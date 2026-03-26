@@ -1,0 +1,653 @@
+{{- $deploymentMode := .Values.alloy.deploymentMode | default "alloy" }}
+{{- if eq $deploymentMode "alloy" }}
+apiVersion: collectors.grafana.com/v1alpha1
+kind: Alloy
+metadata:
+  name: {{ .Values.alloy.name }}
+  namespace: {{ .Values.alloy.namespace }}
+spec:
+  alloy:
+    stabilityLevel: experimental
+{{- if and .Values.gateway .Values.gateway.enabled .Values.gateway.protocol (eq .Values.gateway.protocol "grpc") }}
+    # Disable ALPN enforcement for gRPC when using NLB with TLS termination
+    env:
+      - name: GRPC_ENFORCE_ALPN_ENABLED
+        value: "false"
+{{- end }}
+    configMap:
+      content: |
+
+        // Discover Kubernetes pods with metrics endpoints
+        discovery.kubernetes "pods" {
+          role = "pod"
+
+          namespaces {
+            names = [{{ if .Values.discovery }}{{ .Values.discovery.namespace | quote }}{{ else }}{{ .Release.Namespace | quote }}{{ end }}]
+          }
+
+          selectors {
+            role  = "pod"
+            label = {{ if .Values.discovery }}{{ .Values.discovery.labelSelector | quote }}{{ else }}"app.kubernetes.io/name=redpanda"{{ end }}
+          }
+        }
+
+        // Relabel discovered targets to only scrape annotated pods
+        discovery.relabel "kubernetes_pods" {
+          targets = discovery.kubernetes.pods.targets
+
+          // Only scrape pods with the Redpanda admin port
+          rule {
+            source_labels = ["__meta_kubernetes_pod_container_port_number"]
+            action        = "keep"
+            regex         = {{ if .Values.scrape }}{{ .Values.scrape.adminPort | quote }}{{ else }}"9644"{{ end }}
+          }
+
+          // Label creation - "namespace" field from "__meta_kubernetes_namespace"
+          rule {
+            source_labels = ["__meta_kubernetes_namespace"]
+            action = "replace"
+            target_label = "namespace"
+          }
+
+          // Label creation - "pod" field from "__meta_kubernetes_pod_name"
+          rule {
+            source_labels = ["__meta_kubernetes_pod_name"]
+            action = "replace"
+            target_label = "pod"
+          }
+
+          // Label creation - "container" field from "__meta_kubernetes_pod_container_name"
+          rule {
+            source_labels = ["__meta_kubernetes_pod_container_name"]
+            action = "replace"
+            target_label = "container"
+          }
+
+          // Label creation -  "app" field from "__meta_kubernetes_pod_label_app_kubernetes_io_name"
+          rule {
+            source_labels = ["__meta_kubernetes_pod_label_app_kubernetes_io_name"]
+            action = "replace"
+            target_label = "app"
+          }
+
+          // Label creation -  "job" field from "__meta_kubernetes_namespace" and "__meta_kubernetes_pod_container_name"
+          // Concatenate values __meta_kubernetes_namespace/__meta_kubernetes_pod_container_name
+          rule {
+            source_labels = ["__meta_kubernetes_namespace", "__meta_kubernetes_pod_container_name"]
+            action = "replace"
+            target_label = "job"
+            separator = "/"
+            replacement = "$1"
+          }
+
+          // Label creation - "container" field from "__meta_kubernetes_pod_uid" and "__meta_kubernetes_pod_container_name"
+          // Concatenate values __meta_kubernetes_pod_uid/__meta_kubernetes_pod_container_name.log
+          rule {
+            source_labels = ["__meta_kubernetes_pod_uid", "__meta_kubernetes_pod_container_name"]
+            action = "replace"
+            target_label = "__path__"
+            separator = "/"
+            replacement = "/var/log/pods/*$1/*.log"
+          }
+
+          // Label creation -  "container_runtime" field from "__meta_kubernetes_pod_container_id"
+          rule {
+            source_labels = ["__meta_kubernetes_pod_container_id"]
+            action = "replace"
+            target_label = "container_runtime"
+            regex = "^(\\S+):\\/\\/.+$"
+            replacement = "$1"
+          }
+
+          // Static rule - redpanda source type
+          rule {
+            target_label = "redpanda_source"
+            replacement  = "self_managed"
+          }
+
+          // Add endpoint identifier
+          rule {
+            target_label = "endpoint"
+            replacement  = "metrics"
+          }
+
+        }
+
+        // Relabel discovered targets for /public_metrics endpoint
+        discovery.relabel "kubernetes_pods_public" {
+          targets = discovery.relabel.kubernetes_pods.output
+
+          // Set the metrics path to /public_metrics
+          rule {
+            target_label = "__metrics_path__"
+            replacement  = "/public_metrics"
+          }
+
+          // Add endpoint identifier
+          rule {
+            target_label = "endpoint"
+            replacement  = "public_metrics"
+          }
+        }
+
+        // Scrape metrics from discovered pods
+        // Scrape metrics via HTTP (works for non-TLS clusters)
+        prometheus.scrape "kubernetes_metrics_http" {
+          targets    = discovery.relabel.kubernetes_pods.output
+          forward_to = [otelcol.receiver.prometheus.default.receiver]
+          scrape_interval = {{ if .Values.scrape }}{{ .Values.scrape.interval | quote }}{{ else }}"30s"{{ end }}
+          scrape_timeout  = {{ if .Values.scrape }}{{ .Values.scrape.timeout | quote }}{{ else }}"10s"{{ end }}
+        }
+
+        // Scrape metrics via HTTPS (works for TLS-enabled clusters)
+        prometheus.scrape "kubernetes_metrics_https" {
+          targets    = discovery.relabel.kubernetes_pods.output
+          forward_to = [otelcol.receiver.prometheus.default.receiver]
+          scrape_interval = {{ if .Values.scrape }}{{ .Values.scrape.interval | quote }}{{ else }}"30s"{{ end }}
+          scrape_timeout  = {{ if .Values.scrape }}{{ .Values.scrape.timeout | quote }}{{ else }}"10s"{{ end }}
+          scheme = "https"
+          tls_config {
+            insecure_skip_verify = true
+          }
+        }
+
+        {{- if .Values.gateway }}{{- if .Values.gateway.enabled }}
+        // Basic Auth for Gateway
+        otelcol.auth.basic "gateway" {
+          username = {{ include "redpanda-o11y.gatewayUsername" . | quote }}
+          password = {{ include "redpanda-o11y.gatewayPassword" . | quote }}
+        }
+        {{- end }}{{- end }}
+
+        // Scrape public metrics via HTTP
+        prometheus.scrape "kubernetes_metrics_public_http" {
+          targets    = discovery.relabel.kubernetes_pods_public.output
+          forward_to = [otelcol.receiver.prometheus.default.receiver]
+          scrape_interval = {{ if .Values.scrape }}{{ .Values.scrape.interval | quote }}{{ else }}"30s"{{ end }}
+          scrape_timeout  = {{ if .Values.scrape }}{{ .Values.scrape.timeout | quote }}{{ else }}"10s"{{ end }}
+        }
+
+        // Scrape public metrics via HTTPS
+        prometheus.scrape "kubernetes_metrics_public_https" {
+          targets    = discovery.relabel.kubernetes_pods_public.output
+          forward_to = [otelcol.receiver.prometheus.default.receiver]
+          scrape_interval = {{ if .Values.scrape }}{{ .Values.scrape.interval | quote }}{{ else }}"30s"{{ end }}
+          scrape_timeout  = {{ if .Values.scrape }}{{ .Values.scrape.timeout | quote }}{{ else }}"10s"{{ end }}
+          scheme = "https"
+          tls_config {
+            insecure_skip_verify = true
+          }
+        }
+
+        // Fetch cluster UUID from Redpanda API
+        {{- if and .Values.redpanda .Values.redpanda.clusterUuidEndpoint (eq .Values.redpanda.clusterUuidEndpoint "http") }}
+        // HTTP-only cluster
+        remote.http "cluster_uuid_http" {
+          url = "http://{{ if .Values.redpanda }}{{ if .Values.redpanda.clusterUuidPod }}{{ .Values.redpanda.clusterUuidPod }}{{ else }}redpanda-0.redpanda{{ end }}{{ else }}redpanda-0.redpanda{{ end }}.{{ if .Values.discovery }}{{ .Values.discovery.namespace }}{{ else }}redpanda{{ end }}.svc.cluster.local:{{ if .Values.redpanda }}{{ if .Values.redpanda.clusterUuidPort }}{{ .Values.redpanda.clusterUuidPort }}{{ else }}9644{{ end }}{{ else }}9644{{ end }}/v1/cluster/uuid"
+          poll_frequency = "5m"
+          poll_timeout = "10s"
+        }
+        {{- else }}
+        // Try HTTPS first (some clusters have TLS enabled on admin API)
+        remote.http "cluster_uuid_https" {
+          url = "https://{{ if .Values.redpanda }}{{ if .Values.redpanda.clusterUuidPod }}{{ .Values.redpanda.clusterUuidPod }}{{ else }}redpanda-0.redpanda{{ end }}{{ else }}redpanda-0.redpanda{{ end }}.{{ if .Values.discovery }}{{ .Values.discovery.namespace }}{{ else }}redpanda{{ end }}.svc.cluster.local:{{ if .Values.redpanda }}{{ if .Values.redpanda.clusterUuidPort }}{{ .Values.redpanda.clusterUuidPort }}{{ else }}9644{{ end }}{{ else }}9644{{ end }}/v1/cluster/uuid"
+          client {
+            tls_config {
+              insecure_skip_verify = true
+            }
+          }
+          poll_frequency = "5m"
+          poll_timeout = "10s"
+        }
+
+        // HTTP fallback
+        remote.http "cluster_uuid_http" {
+          url = "http://{{ if .Values.redpanda }}{{ if .Values.redpanda.clusterUuidPod }}{{ .Values.redpanda.clusterUuidPod }}{{ else }}redpanda-0.redpanda{{ end }}{{ else }}redpanda-0.redpanda{{ end }}.{{ if .Values.discovery }}{{ .Values.discovery.namespace }}{{ else }}redpanda{{ end }}.svc.cluster.local:{{ if .Values.redpanda }}{{ if .Values.redpanda.clusterUuidPort }}{{ .Values.redpanda.clusterUuidPort }}{{ else }}9644{{ end }}{{ else }}9644{{ end }}/v1/cluster/uuid"
+          poll_frequency = "5m"
+          poll_timeout = "10s"
+        }
+        {{- end }}
+
+        // Convert Prometheus metrics to OpenTelemetry format
+        otelcol.receiver.prometheus "default" {
+          output {
+            metrics = [otelcol.processor.transform.add_cluster_id.input]
+          }
+        }
+
+        // Add cluster_id as a resource attribute using dynamic UUID
+        otelcol.processor.transform "add_cluster_id" {
+          error_mode = "ignore"
+
+          metric_statements {
+            context = "resource"
+            statements = [
+              {{- if and .Values.redpanda .Values.redpanda.clusterUuidEndpoint (eq .Values.redpanda.clusterUuidEndpoint "http") }}
+              `set(attributes["cluster_id"], "` + json_decode(remote.http.cluster_uuid_http.content)["cluster_uuid"] + `")`,
+              {{- else }}
+              `set(attributes["cluster_id"], "` + json_decode(remote.http.cluster_uuid_https.content)["cluster_uuid"] + `")`,
+              {{- end }}
+            ]
+          }
+
+          output {
+            metrics = [otelcol.processor.batch.default.input]
+          }
+        }
+
+        // Batch processing for efficiency
+        otelcol.processor.batch "default" {
+          send_batch_size     = {{ if .Values.batch }}{{ .Values.batch.metricsBatchSize }}{{ else }}5000{{ end }}
+          send_batch_max_size = {{ if .Values.batch }}{{ .Values.batch.metricsBatchMaxSize }}{{ else }}5000{{ end }}
+          timeout             = {{ if .Values.batch }}{{ .Values.batch.timeout | quote }}{{ else }}"10s"{{ end }}
+
+          output {
+            {{- if .Values.gateway }}{{- if .Values.gateway.enabled }}
+            {{- if and .Values.gateway.protocol (eq .Values.gateway.protocol "grpc") }}
+            metrics = [otelcol.exporter.otlp.metrics_gateway.input]
+            {{- else }}
+            metrics = [otelcol.exporter.otlphttp.metrics_gateway.input]
+            {{- end }}
+            {{- else }}
+            metrics = [otelcol.exporter.kafka.metrics_to_kafka.input]
+            {{- end }}{{- else }}
+            metrics = [otelcol.exporter.kafka.metrics_to_kafka.input]
+            {{- end }}
+          }
+        }
+        {{- if .Values.gateway }}{{- if .Values.gateway.enabled }}
+
+        {{- if and .Values.gateway.protocol (eq .Values.gateway.protocol "grpc") }}
+        // Export metrics to Gateway via OTLP gRPC (more efficient than HTTP, with Basic Auth)
+        otelcol.exporter.otlp "metrics_gateway" {
+          client {
+            endpoint = {{ .Values.gateway.endpoint | quote }}
+            auth = otelcol.auth.basic.gateway.handler
+            {{- if .Values.gateway.tls }}
+            tls {
+              insecure             = {{ .Values.gateway.tls.insecure }}
+              insecure_skip_verify = {{ .Values.gateway.tls.insecure_skip_verify }}
+            }
+            {{- end }}
+          }
+
+          {{- if .Values.exportQueue }}
+          sending_queue {
+            enabled = {{ if .Values.exportQueue.enabled }}{{ .Values.exportQueue.enabled }}{{ else }}true{{ end }}
+            queue_size = {{ if .Values.exportQueue.metricsQueueSize }}{{ .Values.exportQueue.metricsQueueSize }}{{ else }}50000{{ end }}
+            num_consumers = {{ if .Values.exportQueue.numConsumers }}{{ .Values.exportQueue.numConsumers }}{{ else }}20{{ end }}
+          }
+          {{- end }}
+        }
+        {{- else }}
+        // Export metrics to Gateway via OTLP HTTP (with Basic Auth)
+        otelcol.exporter.otlphttp "metrics_gateway" {
+          client {
+            endpoint = {{ .Values.gateway.endpoint | quote }}
+            auth = otelcol.auth.basic.gateway.handler
+            {{- if .Values.gateway.tls }}
+            tls {
+              insecure             = {{ .Values.gateway.tls.insecure }}
+              insecure_skip_verify = {{ .Values.gateway.tls.insecure_skip_verify }}
+            }
+            {{- end }}
+          }
+
+          {{- if .Values.exportQueue }}
+          sending_queue {
+            enabled = {{ if .Values.exportQueue.enabled }}{{ .Values.exportQueue.enabled }}{{ else }}true{{ end }}
+            queue_size = {{ if .Values.exportQueue.metricsQueueSize }}{{ .Values.exportQueue.metricsQueueSize }}{{ else }}50000{{ end }}
+            num_consumers = {{ if .Values.exportQueue.numConsumers }}{{ .Values.exportQueue.numConsumers }}{{ else }}20{{ end }}
+          }
+          {{- end }}
+        }
+        {{- end }}
+        {{- else }}
+
+        // Export metrics to Kafka
+        otelcol.exporter.kafka "metrics_to_kafka" {
+          protocol_version = "2.1.0"
+          brokers = [{{ if .Values.redpanda }}{{ .Values.redpanda.bootstrapServer | quote }}{{ else }}"seed-47aa9fc7.d61ib847ecku8d3si4c0.byoc.prd.cloud.redpanda.com:9092"{{ end }}]
+          authentication {
+            sasl {
+              mechanism = {{ if .Values.redpanda }}{{ .Values.redpanda.saslMechanism | quote }}{{ else }}"SCRAM-SHA-256"{{ end }}
+              username = {{ include "redpanda-o11y.kafkaUsername" . | quote }}
+              password = {{ include "redpanda-o11y.kafkaPassword" . | quote }}
+            }
+            tls {
+              insecure = false
+            }
+          }
+          producer {
+            max_message_bytes = {{ if .Values.producer }}{{ .Values.producer.metricsMaxMessageBytes }}{{ else }}10485760{{ end }}
+            compression = {{ if .Values.producer }}{{ .Values.producer.metricsCompression | quote }}{{ else }}"zstd"{{ end }}
+          }
+          metrics {
+            {{- if .Values.topics }}{{- if .Values.topics.metrics }}
+            topic = {{ .Values.topics.metrics | quote }}
+            {{- else }}
+            {{- if and .Values.redpanda .Values.redpanda.clusterUuidEndpoint (eq .Values.redpanda.clusterUuidEndpoint "http") }}
+            topic = {{ required "customer name is required" .Values.customer | quote }} + "-metrics-" + json_decode(remote.http.cluster_uuid_http.content)["cluster_uuid"]
+            {{- else }}
+            topic = {{ required "customer name is required" .Values.customer | quote }} + "-metrics-" + json_decode(remote.http.cluster_uuid_https.content)["cluster_uuid"]
+            {{- end }}
+            {{- end }}{{- else }}
+            {{- if and .Values.redpanda .Values.redpanda.clusterUuidEndpoint (eq .Values.redpanda.clusterUuidEndpoint "http") }}
+            topic = {{ required "customer name is required" .Values.customer | quote }} + "-metrics-" + json_decode(remote.http.cluster_uuid_http.content)["cluster_uuid"]
+            {{- else }}
+            topic = {{ required "customer name is required" .Values.customer | quote }} + "-metrics-" + json_decode(remote.http.cluster_uuid_https.content)["cluster_uuid"]
+            {{- end }}
+            {{- end }}
+          }
+
+          timeout = {{ if .Values.exportTimeout }}{{ .Values.exportTimeout | quote }}{{ else }}"30s"{{ end }}
+        }
+        {{- end }}{{- else }}
+
+        // Export metrics to Kafka
+        otelcol.exporter.kafka "metrics_to_kafka" {
+          protocol_version = "2.1.0"
+          brokers = [{{ if .Values.redpanda }}{{ .Values.redpanda.bootstrapServer | quote }}{{ else }}"seed-47aa9fc7.d61ib847ecku8d3si4c0.byoc.prd.cloud.redpanda.com:9092"{{ end }}]
+          authentication {
+            sasl {
+              mechanism = {{ if .Values.redpanda }}{{ .Values.redpanda.saslMechanism | quote }}{{ else }}"SCRAM-SHA-256"{{ end }}
+              username = {{ include "redpanda-o11y.kafkaUsername" . | quote }}
+              password = {{ include "redpanda-o11y.kafkaPassword" . | quote }}
+            }
+            tls {
+              insecure = false
+            }
+          }
+          producer {
+            max_message_bytes = {{ if .Values.producer }}{{ .Values.producer.metricsMaxMessageBytes }}{{ else }}10485760{{ end }}
+            compression = {{ if .Values.producer }}{{ .Values.producer.metricsCompression | quote }}{{ else }}"zstd"{{ end }}
+          }
+          metrics {
+            {{- if .Values.topics }}{{- if .Values.topics.metrics }}
+            topic = {{ .Values.topics.metrics | quote }}
+            {{- else }}
+            {{- if and .Values.redpanda .Values.redpanda.clusterUuidEndpoint (eq .Values.redpanda.clusterUuidEndpoint "http") }}
+            topic = {{ required "customer name is required" .Values.customer | quote }} + "-metrics-" + json_decode(remote.http.cluster_uuid_http.content)["cluster_uuid"]
+            {{- else }}
+            topic = {{ required "customer name is required" .Values.customer | quote }} + "-metrics-" + json_decode(remote.http.cluster_uuid_https.content)["cluster_uuid"]
+            {{- end }}
+            {{- end }}{{- else }}
+            {{- if and .Values.redpanda .Values.redpanda.clusterUuidEndpoint (eq .Values.redpanda.clusterUuidEndpoint "http") }}
+            topic = {{ required "customer name is required" .Values.customer | quote }} + "-metrics-" + json_decode(remote.http.cluster_uuid_http.content)["cluster_uuid"]
+            {{- else }}
+            topic = {{ required "customer name is required" .Values.customer | quote }} + "-metrics-" + json_decode(remote.http.cluster_uuid_https.content)["cluster_uuid"]
+            {{- end }}
+            {{- end }}
+          }
+
+          timeout = {{ if .Values.exportTimeout }}{{ .Values.exportTimeout | quote }}{{ else }}"30s"{{ end }}
+        }
+        {{- end }}
+
+        // discovery.relabel rewrites the label set of the input targets by applying one or more relabeling rules.
+        // If no rules are defined, then the input targets are exported as-is.
+        discovery.relabel "pod_logs" {
+          targets = discovery.kubernetes.pods.targets
+
+          // Label creation - "namespace" field from "__meta_kubernetes_namespace"
+          rule {
+            source_labels = ["__meta_kubernetes_namespace"]
+            action = "replace"
+            target_label = "namespace"
+          }
+
+          // Label creation - "pod" field from "__meta_kubernetes_pod_name"
+          rule {
+            source_labels = ["__meta_kubernetes_pod_name"]
+            action = "replace"
+            target_label = "pod"
+          }
+
+          // Label creation - "container" field from "__meta_kubernetes_pod_container_name"
+          rule {
+            source_labels = ["__meta_kubernetes_pod_container_name"]
+            action = "replace"
+            target_label = "container"
+          }
+
+          // Label creation -  "app" field from "__meta_kubernetes_pod_label_app_kubernetes_io_name"
+          rule {
+            source_labels = ["__meta_kubernetes_pod_label_app_kubernetes_io_name"]
+            action = "replace"
+            target_label = "app"
+          }
+
+          // Label creation -  "job" field from "__meta_kubernetes_namespace" and "__meta_kubernetes_pod_container_name"
+          // Concatenate values __meta_kubernetes_namespace/__meta_kubernetes_pod_container_name
+          rule {
+            source_labels = ["__meta_kubernetes_namespace", "__meta_kubernetes_pod_container_name"]
+            action = "replace"
+            target_label = "job"
+            separator = "/"
+            replacement = "$1"
+          }
+
+          // Label creation - "container" field from "__meta_kubernetes_pod_uid" and "__meta_kubernetes_pod_container_name"
+          // Concatenate values __meta_kubernetes_pod_uid/__meta_kubernetes_pod_container_name.log
+          rule {
+            source_labels = ["__meta_kubernetes_pod_uid", "__meta_kubernetes_pod_container_name"]
+            action = "replace"
+            target_label = "__path__"
+            separator = "/"
+            replacement = "/var/log/pods/*$1/*.log"
+          }
+
+          // Label creation -  "container_runtime" field from "__meta_kubernetes_pod_container_id"
+          rule {
+            source_labels = ["__meta_kubernetes_pod_container_id"]
+            action = "replace"
+            target_label = "container_runtime"
+            regex = "^(\\S+):\\/\\/.+$"
+            replacement = "$1"
+          }
+        }
+
+        loki.source.kubernetes "pod_logs" {
+          targets    = discovery.relabel.pod_logs.output
+          forward_to = [loki.relabel.relabeller.receiver]
+        }
+
+        loki.relabel "relabeller" {
+
+          // Static rule - redpanda source type
+          rule {
+            target_label = "redpanda_source"
+            replacement  = "self_managed"
+          }
+
+          rule {
+            action = "labeldrop"
+            regex  = "app"
+          }
+
+          rule {
+            action = "labeldrop"
+            regex  = "container_runtime"
+          }
+
+          // Drop logs where instance doesn't end with "redpanda"
+          rule {
+            source_labels = ["instance"]
+            regex         = "^(.*redpanda)$"
+            action        = "keep"
+          }
+
+          forward_to = [otelcol.receiver.loki.default.receiver]
+        }
+
+        otelcol.receiver.loki "default" {
+          output {
+            logs = [otelcol.processor.transform.add_cluster_id_logs.input]
+          }
+        }
+
+        // Add cluster_id as a resource attribute for logs using dynamic UUID
+        otelcol.processor.transform "add_cluster_id_logs" {
+          error_mode = "ignore"
+
+          log_statements {
+            context = "resource"
+            statements = [
+              {{- if and .Values.redpanda .Values.redpanda.clusterUuidEndpoint (eq .Values.redpanda.clusterUuidEndpoint "http") }}
+              `set(attributes["cluster_id"], "` + json_decode(remote.http.cluster_uuid_http.content)["cluster_uuid"] + `")`,
+              {{- else }}
+              `set(attributes["cluster_id"], "` + json_decode(remote.http.cluster_uuid_https.content)["cluster_uuid"] + `")`,
+              {{- end }}
+            ]
+          }
+
+          output {
+            logs = [otelcol.processor.batch.batcher.input]
+          }
+        }
+
+        otelcol.processor.batch "batcher" {
+          timeout = {{ if .Values.batch }}{{ .Values.batch.timeout | quote }}{{ else }}"10s"{{ end }}
+          send_batch_size = {{ if .Values.batch }}{{ .Values.batch.logsBatchSize }}{{ else }}10000{{ end }}
+          send_batch_max_size = {{ if .Values.batch }}{{ .Values.batch.logsBatchSize }}{{ else }}10000{{ end }}
+          output {
+            {{- if .Values.gateway }}{{- if .Values.gateway.enabled }}
+            {{- if and .Values.gateway.protocol (eq .Values.gateway.protocol "grpc") }}
+            logs = [otelcol.exporter.otlp.logs_gateway.input]
+            {{- else }}
+            logs = [otelcol.exporter.otlphttp.logs_gateway.input]
+            {{- end }}
+            {{- else }}
+            logs = [otelcol.exporter.kafka.logs.input]
+            {{- end }}{{- else }}
+            logs = [otelcol.exporter.kafka.logs.input]
+            {{- end }}
+          }
+        }
+        {{- if .Values.gateway }}{{- if .Values.gateway.enabled }}
+
+        {{- if and .Values.gateway.protocol (eq .Values.gateway.protocol "grpc") }}
+        // Export logs to Gateway via OTLP gRPC (more efficient than HTTP, with Basic Auth)
+        otelcol.exporter.otlp "logs_gateway" {
+          client {
+            endpoint = {{ .Values.gateway.endpoint | quote }}
+            auth = otelcol.auth.basic.gateway.handler
+            {{- if .Values.gateway.tls }}
+            tls {
+              insecure             = {{ .Values.gateway.tls.insecure }}
+              insecure_skip_verify = {{ .Values.gateway.tls.insecure_skip_verify }}
+            }
+            {{- end }}
+          }
+
+          {{- if .Values.exportQueue }}
+          sending_queue {
+            enabled = {{ if .Values.exportQueue.enabled }}{{ .Values.exportQueue.enabled }}{{ else }}true{{ end }}
+            queue_size = {{ if .Values.exportQueue.logsQueueSize }}{{ .Values.exportQueue.logsQueueSize }}{{ else }}50000{{ end }}
+            num_consumers = {{ if .Values.exportQueue.numConsumers }}{{ .Values.exportQueue.numConsumers }}{{ else }}20{{ end }}
+          }
+          {{- end }}
+        }
+        {{- else }}
+        // Export logs to Gateway via OTLP HTTP (with Basic Auth)
+        otelcol.exporter.otlphttp "logs_gateway" {
+          client {
+            endpoint = {{ .Values.gateway.endpoint | quote }}
+            auth = otelcol.auth.basic.gateway.handler
+            {{- if .Values.gateway.tls }}
+            tls {
+              insecure             = {{ .Values.gateway.tls.insecure }}
+              insecure_skip_verify = {{ .Values.gateway.tls.insecure_skip_verify }}
+            }
+            {{- end }}
+          }
+
+          {{- if .Values.exportQueue }}
+          sending_queue {
+            enabled = {{ if .Values.exportQueue.enabled }}{{ .Values.exportQueue.enabled }}{{ else }}true{{ end }}
+            queue_size = {{ if .Values.exportQueue.logsQueueSize }}{{ .Values.exportQueue.logsQueueSize }}{{ else }}50000{{ end }}
+            num_consumers = {{ if .Values.exportQueue.numConsumers }}{{ .Values.exportQueue.numConsumers }}{{ else }}20{{ end }}
+          }
+          {{- end }}
+        }
+        {{- end }}
+        {{- else }}
+
+        otelcol.exporter.kafka "logs" {
+          protocol_version = "2.1.0"
+          brokers = [{{ if .Values.redpanda }}{{ .Values.redpanda.bootstrapServer | quote }}{{ else }}"seed-47aa9fc7.d61ib847ecku8d3si4c0.byoc.prd.cloud.redpanda.com:9092"{{ end }}]
+          authentication {
+            sasl {
+              mechanism = {{ if .Values.redpanda }}{{ .Values.redpanda.saslMechanism | quote }}{{ else }}"SCRAM-SHA-256"{{ end }}
+              username = {{ include "redpanda-o11y.kafkaUsername" . | quote }}
+              password = {{ include "redpanda-o11y.kafkaPassword" . | quote }}
+            }
+            tls {
+              insecure = false
+            }
+          }
+          producer {
+            max_message_bytes = {{ if .Values.producer }}{{ .Values.producer.logsMaxMessageBytes }}{{ else }}10485760{{ end }}
+            compression = {{ if .Values.producer }}{{ .Values.producer.logsCompression | quote }}{{ else }}"zstd"{{ end }}
+          }
+          logs {
+            {{- if .Values.topics }}{{- if .Values.topics.logs }}
+            topic = {{ .Values.topics.logs | quote }}
+            {{- else }}
+            {{- if and .Values.redpanda .Values.redpanda.clusterUuidEndpoint (eq .Values.redpanda.clusterUuidEndpoint "http") }}
+            topic = {{ required "customer name is required" .Values.customer | quote }} + "-logs-" + json_decode(remote.http.cluster_uuid_http.content)["cluster_uuid"]
+            {{- else }}
+            topic = {{ required "customer name is required" .Values.customer | quote }} + "-logs-" + json_decode(remote.http.cluster_uuid_https.content)["cluster_uuid"]
+            {{- end }}
+            {{- end }}{{- else }}
+            {{- if and .Values.redpanda .Values.redpanda.clusterUuidEndpoint (eq .Values.redpanda.clusterUuidEndpoint "http") }}
+            topic = {{ required "customer name is required" .Values.customer | quote }} + "-logs-" + json_decode(remote.http.cluster_uuid_http.content)["cluster_uuid"]
+            {{- else }}
+            topic = {{ required "customer name is required" .Values.customer | quote }} + "-logs-" + json_decode(remote.http.cluster_uuid_https.content)["cluster_uuid"]
+            {{- end }}
+            {{- end }}
+          }
+
+          timeout = {{ if .Values.exportTimeout }}{{ .Values.exportTimeout | quote }}{{ else }}"30s"{{ end }}
+        }
+        {{- end }}{{- else }}
+
+        otelcol.exporter.kafka "logs" {
+          protocol_version = "2.1.0"
+          brokers = [{{ if .Values.redpanda }}{{ .Values.redpanda.bootstrapServer | quote }}{{ else }}"seed-47aa9fc7.d61ib847ecku8d3si4c0.byoc.prd.cloud.redpanda.com:9092"{{ end }}]
+          authentication {
+            sasl {
+              mechanism = {{ if .Values.redpanda }}{{ .Values.redpanda.saslMechanism | quote }}{{ else }}"SCRAM-SHA-256"{{ end }}
+              username = {{ include "redpanda-o11y.kafkaUsername" . | quote }}
+              password = {{ include "redpanda-o11y.kafkaPassword" . | quote }}
+            }
+            tls {
+              insecure = false
+            }
+          }
+          producer {
+            max_message_bytes = {{ if .Values.producer }}{{ .Values.producer.logsMaxMessageBytes }}{{ else }}10485760{{ end }}
+            compression = {{ if .Values.producer }}{{ .Values.producer.logsCompression | quote }}{{ else }}"zstd"{{ end }}
+          }
+          logs {
+            {{- if .Values.topics }}{{- if .Values.topics.logs }}
+            topic = {{ .Values.topics.logs | quote }}
+            {{- else }}
+            {{- if and .Values.redpanda .Values.redpanda.clusterUuidEndpoint (eq .Values.redpanda.clusterUuidEndpoint "http") }}
+            topic = {{ required "customer name is required" .Values.customer | quote }} + "-logs-" + json_decode(remote.http.cluster_uuid_http.content)["cluster_uuid"]
+            {{- else }}
+            topic = {{ required "customer name is required" .Values.customer | quote }} + "-logs-" + json_decode(remote.http.cluster_uuid_https.content)["cluster_uuid"]
+            {{- end }}
+            {{- end }}{{- else }}
+            {{- if and .Values.redpanda .Values.redpanda.clusterUuidEndpoint (eq .Values.redpanda.clusterUuidEndpoint "http") }}
+            topic = {{ required "customer name is required" .Values.customer | quote }} + "-logs-" + json_decode(remote.http.cluster_uuid_http.content)["cluster_uuid"]
+            {{- else }}
+            topic = {{ required "customer name is required" .Values.customer | quote }} + "-logs-" + json_decode(remote.http.cluster_uuid_https.content)["cluster_uuid"]
+            {{- end }}
+            {{- end }}
+          }
+
+          timeout = {{ if .Values.exportTimeout }}{{ .Values.exportTimeout | quote }}{{ else }}"30s"{{ end }}
+        }
+        {{- end }}
+{{- end }}

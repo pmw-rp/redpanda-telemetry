@@ -1,0 +1,15 @@
+apiVersion: v2
+name: redpanda-o11y
+description: Grafana Alloy collector for Redpanda observability
+type: application
+version: 0.1.0
+appVersion: "1.0"
+maintainers:
+  - name: Redpanda CS
+keywords:
+  - redpanda
+  - observability
+  - alloy
+  - grafana
+  - metrics
+  - logs

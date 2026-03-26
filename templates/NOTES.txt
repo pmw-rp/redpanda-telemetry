@@ -1,0 +1,81 @@
+Thank you for installing {{ .Chart.Name }}!
+
+Your Alloy observability collector has been deployed with the following configuration:
+
+Release Name: {{ .Release.Name }}
+Namespace: {{ .Values.alloy.namespace }}
+Alloy Instance: {{ .Values.alloy.name }}
+
+Configuration Summary:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Customer: {{ .Values.customer }}
+  → Used to construct default topic names
+
+Cluster ID Discovery:
+  → Automatically fetched from Redpanda API (/v1/cluster/uuid)
+  → Attached as cluster_id resource attribute to all telemetry
+
+{{- if .Values.gateway }}{{- if .Values.gateway.enabled }}
+
+Gateway Mode:
+  → Endpoint: {{ .Values.gateway.endpoint }}
+  → Authentication: HTTP Basic Auth (customer credentials)
+
+{{- else }}
+
+Direct Mode:
+  → Bootstrap: {{ if .Values.redpanda }}{{ .Values.redpanda.bootstrapServer }}{{ else }}seed-47aa9fc7.d61ib847ecku8d3si4c0.byoc.prd.cloud.redpanda.com:9092{{ end }}
+  → SASL Mechanism: {{ if .Values.redpanda }}{{ .Values.redpanda.saslMechanism }}{{ else }}SCRAM-SHA-256{{ end }}
+
+{{- end }}{{- end }}
+
+Topics:
+{{- if .Values.topics }}{{- if .Values.topics.metrics }}
+  → Metrics: {{ .Values.topics.metrics }} (explicit)
+{{- else }}
+  → Metrics: {{ .Values.customer }}-metrics-{cluster_id} (dynamic)
+{{- end }}{{- else }}
+  → Metrics: {{ .Values.customer }}-metrics-{cluster_id} (dynamic)
+{{- end }}
+{{- if .Values.topics }}{{- if .Values.topics.logs }}
+  → Logs: {{ .Values.topics.logs }} (explicit)
+{{- else }}
+  → Logs: {{ .Values.customer }}-logs-{cluster_id} (dynamic)
+{{- end }}{{- else }}
+  → Logs: {{ .Values.customer }}-logs-{cluster_id} (dynamic)
+{{- end }}
+
+Source Discovery:
+  → Namespace: {{ if .Values.discovery }}{{ .Values.discovery.namespace }}{{ else }}{{ .Release.Namespace }}{{ end }}
+  → Label Selector: {{ if .Values.discovery }}{{ .Values.discovery.labelSelector }}{{ else }}app.kubernetes.io/name=redpanda{{ end }}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Next Steps:
+
+1. Check the Alloy collector status:
+   kubectl get alloy {{ .Values.alloy.name }} -n {{ .Values.alloy.namespace }}
+
+2. Verify the Alloy pods are running:
+   kubectl get pods -n {{ .Values.alloy.namespace }} -l app.kubernetes.io/name=alloy
+
+3. View Alloy collector logs:
+   kubectl logs -n {{ .Values.alloy.namespace }} -l app.kubernetes.io/name=alloy -f
+
+4. Verify metrics are being scraped:
+   - Check Alloy logs for "scrape" messages
+   - Verify data is flowing to Redpanda Cloud topics
+
+Troubleshooting:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+If you encounter issues:
+
+• Verify Redpanda pods exist:
+  kubectl get pods -n {{ if .Values.discovery }}{{ .Values.discovery.namespace }}{{ else }}{{ .Release.Namespace }}{{ end }} -l {{ if .Values.discovery }}{{ .Values.discovery.labelSelector }}{{ else }}app.kubernetes.io/name=redpanda{{ end }}
+
+• Check authentication:
+  - Verify customer credentials secret exists in namespace {{ .Values.alloy.namespace }}
+  - Verify the customer user has WRITE permissions to topics with prefix "{{ .Values.customer }}-"
+

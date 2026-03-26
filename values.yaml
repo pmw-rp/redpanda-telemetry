@@ -1,0 +1,238 @@
+# ==============================================================================
+# Redpanda O11y Collector - Values Configuration
+# ==============================================================================
+# This file documents all available configuration options for the collector.
+# Uncomment and modify values as needed for your environment.
+#
+# For complete documentation, see: README.md
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# Alloy Instance Configuration
+# ------------------------------------------------------------------------------
+alloy:
+  # Name of the Alloy instance
+  name: collector
+
+  # Kubernetes namespace for the collector
+  namespace: redpanda
+
+  # Deployment mode: "alloy" or "direct"
+  # - alloy: Creates Alloy custom resource, requires Alloy operator (default)
+  # - direct: Creates Kubernetes resources directly (DaemonSet, ConfigMap, RBAC) without operator
+  deploymentMode: "alloy"
+
+  # Override the Alloy container image (optional)
+  # Defaults to paulmw/alloy:v1.13.2-kafkarouter
+  # image: "paulmw/alloy:v1.13.2-kafkarouter"
+
+# ------------------------------------------------------------------------------
+# Customer Configuration (REQUIRED)
+# ------------------------------------------------------------------------------
+# Customer name used to construct default topic names
+# Topics are auto-constructed as: {customer}-{type}-{cluster_id}
+# Example: "acme" → "acme-metrics-68e2368c-87d6-436a-8132-bc55be44950f"
+customer: "CHANGEME"  # REQUIRED - Replace with your customer name
+
+# ------------------------------------------------------------------------------
+# Topic Configuration (OPTIONAL)
+# ------------------------------------------------------------------------------
+# By default, topics are automatically constructed as:
+#   metrics: "{customer}-metrics-{cluster_id}"
+#   logs: "{customer}-logs-{cluster_id}"
+# where cluster_id is dynamically fetched from Redpanda API
+#
+# Uncomment to override with explicit topic names:
+#topics:
+#  metrics: "custom-metrics-topic"
+#  logs: "custom-logs-topic"
+
+# ------------------------------------------------------------------------------
+# Authentication Credentials
+# ------------------------------------------------------------------------------
+# Used for both Gateway mode (OTLP HTTP Basic Auth) and Direct mode (Kafka SASL)
+#
+# Option 1: Kubernetes Secret (RECOMMENDED)
+# Option 2: Explicit username/password (not recommended for production)
+credentials:
+  # Name of Kubernetes secret containing 'username' and 'password' keys
+  # If the secret does not exist, the chart installation will fail
+  secretName: ""  # Uncomment and set to use secret-based auth
+
+  # Explicit credentials (not recommended - use secretName instead)
+  # username: ""
+  # password: ""
+
+# ------------------------------------------------------------------------------
+# Gateway Configuration (OPTIONAL)
+# ------------------------------------------------------------------------------
+# When enabled, data is sent to Alloy Gateway via OTLP HTTP with Basic Auth
+# instead of directly to Kafka. Gateway handles routing to appropriate topics.
+gateway:
+  # Enable gateway mode
+  enabled: false
+
+  # Gateway OTLP endpoint
+  endpoint: "https://gateway.observability.cs.redpanda.com:443"
+
+  # Protocol for OTLP export (optional)
+  # Options: "http" (default), "grpc" (more efficient)
+  # Both protocols use Basic Auth via nginx for authentication
+  # Note: When using gRPC with TLS-terminating load balancers (like AWS NLB),
+  # the collector automatically disables ALPN enforcement to work around
+  # TLS termination limitations. This is safe when using authenticated endpoints.
+  # protocol: "grpc"
+
+  # TLS configuration for gateway endpoint
+  # tls:
+  #   insecure: false              # Use plaintext HTTP/gRPC instead of HTTPS/gRPCs
+  #   insecure_skip_verify: false  # Skip TLS certificate verification
+
+  # Gateway-specific authentication credentials (optional)
+  # If omitted, uses credentials from the main 'credentials' section
+  # Both HTTP and gRPC protocols require Basic Auth credentials
+  # credentials:
+  #   secretName: "customer-pmw"
+  #   # OR explicit credentials:
+  #   # username: "gateway-user"
+  #   # password: "gateway-password"
+
+# ------------------------------------------------------------------------------
+# Redpanda Connection Configuration (OPTIONAL)
+# ------------------------------------------------------------------------------
+# Configuration for direct-to-Kafka mode and cluster UUID discovery
+redpanda:
+  # Kafka bootstrap server (for direct mode)
+  bootstrapServer: "seed-47aa9fc7.d61ib847ecku8d3si4c0.byoc.prd.cloud.redpanda.com:9092"
+
+  # SASL authentication mechanism
+  # Options: "SCRAM-SHA-256", "SCRAM-SHA-512"
+  saslMechanism: "SCRAM-SHA-256"
+
+  # Cluster UUID discovery configuration
+  # Used to fetch cluster_id from Redpanda Admin API for dynamic topic construction
+  # Format: <pod-name>.<service-name> (namespace is auto-detected from discovery.namespace)
+  # clusterUuidPod: "redpanda-0.redpanda"  # Default: First pod of StatefulSet
+  # clusterUuidPort: "9644"                # Default: Admin API port
+
+  # Admin API protocol for cluster UUID discovery
+  # Options: "https" (default), "http"
+  # Set to "http" if your Redpanda cluster does not have TLS enabled on the admin API
+  # (e.g. self-managed clusters without TLS, or local development environments)
+  # clusterUuidEndpoint: "http"
+
+# ------------------------------------------------------------------------------
+# Default Topics Failover Configuration (OPTIONAL - direct mode only)
+# ------------------------------------------------------------------------------
+# When enabled, metrics and logs are routed to cluster-specific topics first.
+# If the cluster-specific topic does not exist (e.g. cluster not yet provisioned),
+# the collector automatically falls back to default topics:
+#   metrics: "{customer}-metrics-default"
+#   logs:    "{customer}-logs-default"
+# Once the cluster-specific topic is created, the collector switches back
+# automatically within ~30 seconds (controlled by retryInterval).
+#defaultTopics:
+#  enabled: false
+#
+#  # Number of consecutive send failures before switching to fallback topic
+#  # failureThreshold: 3
+#
+#  # How often to re-probe the primary (cluster-specific) topic after failover
+#  # retryInterval: "30s"
+
+# ------------------------------------------------------------------------------
+# Kubernetes Pod Discovery Configuration (OPTIONAL)
+# ------------------------------------------------------------------------------
+# Configuration for discovering Redpanda pods to scrape metrics and collect logs
+discovery:
+  # Namespace where Redpanda pods are running
+  # Defaults to the same namespace where the collector is deployed
+  namespace: "redpanda"
+
+  # Pod label selector for discovering Redpanda pods
+  # Adjust if your Redpanda deployment uses different labels
+  labelSelector: "app.kubernetes.io/name=redpanda"
+
+# ------------------------------------------------------------------------------
+# Scrape Configuration (OPTIONAL)
+# ------------------------------------------------------------------------------
+# Configuration for Prometheus metrics scraping from Redpanda pods
+# scrape:
+  # Metrics scrape interval
+  # interval: "30s"
+
+  # Scrape timeout
+  # timeout: "10s"
+
+  # Admin API port for metrics collection
+  # Used in service discovery to target the correct port
+  # adminPort: 9644
+
+# ------------------------------------------------------------------------------
+# Batch Processing Configuration (OPTIONAL)
+# ------------------------------------------------------------------------------
+# Configuration for batching telemetry data before export
+# batch:
+  # Batch size for metrics (number of data points)
+  # metricsBatchSize: 5000
+  # metricsBatchMaxSize: 5000
+
+  # Batch size for logs (number of log records)
+  # logsBatchSize: 10000
+
+  # Batch timeout - max time to wait before sending partial batch
+  # timeout: "10s"
+
+# ------------------------------------------------------------------------------
+# Producer Configuration (OPTIONAL)
+# ------------------------------------------------------------------------------
+# Kafka producer settings for direct mode
+# producer:
+  # Compression algorithm for metrics
+  # Options: "none", "gzip", "snappy", "lz4", "zstd"
+  # metricsCompression: "zstd"
+
+  # Maximum message size for metrics (bytes)
+  # metricsMaxMessageBytes: 10485760  # 10MiB
+
+  # Compression algorithm for logs
+  # logsCompression: "zstd"
+
+  # Maximum message size for logs (bytes)
+  # logsMaxMessageBytes: 10485760  # 10MiB
+
+# ------------------------------------------------------------------------------
+# Export Configuration (OPTIONAL)
+# ------------------------------------------------------------------------------
+# Timeout for exporting data to destination (Gateway or Kafka)
+# exportTimeout: "30s"
+
+# ------------------------------------------------------------------------------
+# Export Queue Configuration (OPTIONAL - Gateway mode only)
+# ------------------------------------------------------------------------------
+# Configuration for the OTLP HTTP exporter sending queue
+# Useful for high-volume clusters to prevent queue saturation and data loss
+# exportQueue:
+  # Enable sending queue (default: true when exportQueue is configured)
+  # enabled: true
+
+  # Queue size for metrics (number of batches)
+  # Increase this if collectors are dropping metrics due to queue saturation
+  # metricsQueueSize: 50000  # Default: 50000 (up from OTLP default ~5000)
+
+  # Queue size for logs (number of batches)
+  # logsQueueSize: 50000  # Default: 50000 (up from OTLP default ~5000)
+
+  # Number of concurrent consumers sending data from queue
+  # Increase for higher throughput to gateway
+  # numConsumers: 20  # Default: 20 (up from OTLP default ~10)
+
+  # Timeout for export requests
+  # timeout: "60s"  # Default: 60s (up from default 10s)
+
+# ------------------------------------------------------------------------------
+# Standard Helm Chart Values (OPTIONAL)
+# ------------------------------------------------------------------------------
+# Override default naming for Kubernetes resources
+# nameOverride: ""
+# fullnameOverride: ""
