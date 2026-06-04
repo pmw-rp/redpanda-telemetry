@@ -183,6 +183,7 @@ discovery:
 | `discovery.namespace` | Release namespace | Namespace to discover Redpanda pods in |
 | `discovery.labelSelector` | `app.kubernetes.io/name=redpanda` | Label selector for Redpanda pods |
 | `discovery.adminPort` | `9644` | Redpanda admin API port, used for scrape discovery and UUID fetch |
+| `discovery.appName` | derived from `labelSelector` | Override the StatefulSet/service name used to build the admin API URL and pod scrape regex. Set this when the Helm release name differs from the label value (e.g. `redpanda-sandbox`) |
 | `discovery.adminTLS` | `https` | Protocol for admin API: `https` or `http` |
 | `discovery.scrapeInterval` | `30s` | Prometheus scrape interval |
 | `discovery.scrapeTimeout` | `10s` | Prometheus scrape timeout |

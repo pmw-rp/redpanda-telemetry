@@ -1,7 +1,7 @@
 {{- $deploymentMode := .Values.alloy.deploymentMode | default "alloy" }}
 {{- if eq $deploymentMode "alloy" }}
 {{- $adminTLS := .Values.discovery.adminTLS | default "https" }}
-{{- $appName := (split "=" .Values.discovery.labelSelector)._1 }}
+{{- $appName := .Values.discovery.appName | default (split "=" .Values.discovery.labelSelector)._1 }}
 {{- $namespace := .Values.discovery.namespace | default .Release.Namespace }}
 {{- $adminPort := .Values.discovery.adminPort | default 9644 }}
 {{- $defaultTopicsEnabled := not (eq ((index (.Values.defaultTopics | default dict) "enabled") | toString) "false") }}

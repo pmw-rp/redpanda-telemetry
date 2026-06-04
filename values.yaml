@@ -136,6 +136,13 @@ discovery:
   # Adjust if your Redpanda deployment uses different labels
   labelSelector: "app.kubernetes.io/name=redpanda"
 
+  # Override the app name used to build the admin API URL and pod regex for scraping.
+  # By default this is derived from the label selector value (e.g. "redpanda" from
+  # "app.kubernetes.io/name=redpanda"). Set this when the StatefulSet and headless
+  # service have a different name — for example if the Helm release was named
+  # "redpanda-sandbox", set appName: "redpanda-sandbox".
+  # appName: ""
+
   # Admin API port for metrics collection and cluster UUID discovery
   adminPort: 9644
 
