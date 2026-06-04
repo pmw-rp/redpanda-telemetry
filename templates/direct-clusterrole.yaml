@@ -3,7 +3,7 @@
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: {{ .Values.alloy.name }}-alloy
+  name: {{ include "redpanda-o11y.alloyResourceName" . }}-alloy
   labels:
     app.kubernetes.io/name: alloy
     app.kubernetes.io/instance: {{ .Values.alloy.name }}

@@ -79,3 +79,5 @@ If you encounter issues:
   - Verify customer credentials secret exists in namespace {{ .Values.alloy.namespace }}
   - Verify the customer user has WRITE permissions to topics with prefix "{{ .Values.customer }}-"
 
+For more information, see the chart README or visit:
+https://grafana.com/docs/alloy/latest/

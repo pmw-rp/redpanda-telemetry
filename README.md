@@ -1,4 +1,4 @@
-# Redpanda Telemetry
+# redpanda-o11y
 
 A Helm chart that deploys a [Grafana Alloy](https://grafana.com/docs/alloy/latest/) collector to scrape metrics and collect logs from Redpanda pods and forward them to a Redpanda observability pipeline.
 
@@ -23,24 +23,26 @@ Telemetry is forwarded using one of two transport modes:
 
 The chart supports two deployment modes, controlled by `alloy.deploymentMode`.
 
-### `alloy` (recommended)
+### `direct` (recommended)
+
+Creates Kubernetes resources directly — a StatefulSet (or Deployment/DaemonSet, controlled by `alloy.controllerType`), ConfigMap, ServiceAccount, and RBAC — without requiring the Alloy operator. This is the simpler option and works on any Kubernetes cluster.
+
+StatefulSet is the recommended controller type: each pod gets a stable ordinal that maps 1-to-1 to a Redpanda broker, so each collector instance scrapes and ships telemetry only for its paired broker.
+
+```yaml
+alloy:
+  deploymentMode: "direct"
+  controllerType: "StatefulSet"
+```
+
+### `alloy`
 
 Creates an Alloy Custom Resource, which is managed by the Grafana Alloy Operator. Use this if your cluster already runs the operator and you want operator-managed lifecycle.
 
 ```yaml
 alloy:
-   deploymentMode: "alloy"
-   ```
-
-### `direct`
-
-Creates Kubernetes resources directly — a DaemonSet, ConfigMap, ServiceAccount, and RBAC — without requiring the Alloy operator. This is the simpler option and works on any Kubernetes cluster.
-
-```yaml
-alloy:
-  deploymentMode: "direct"
+  deploymentMode: "alloy"
 ```
-
 
 ## Transport modes
 
@@ -68,7 +70,7 @@ redpanda:
 
 When `defaultTopics.enabled` is set to `true`, the collector routes to the cluster-specific topic by default but automatically falls back to `{customer}-metrics-default` / `{customer}-logs-default` if the cluster-specific topic does not exist. This is useful when a cluster is not yet provisioned in the observability backend.
 
-Once the cluster-specific topic is created, the collector switches back automatically within the configured `retryInterval` (default: 30 seconds).
+The collector switches to the fallback after 3 consecutive failures and re-probes the primary topic every 60 seconds. Once the cluster-specific topic is created, the collector switches back automatically — no restart required.
 
 ```yaml
 defaultTopics:
@@ -151,11 +153,11 @@ The collector fetches the Redpanda cluster UUID from the admin API at startup. B
 https://redpanda-0.redpanda.<namespace>.svc.cluster.local:9644/v1/cluster/uuid
 ```
 
-If your Redpanda cluster does not have TLS enabled on the admin API, set `clusterUuidEndpoint` to `"http"`:
+If your Redpanda cluster does not have TLS enabled on the admin API, set `discovery.adminTLS` to `"http"`:
 
 ```yaml
-redpanda:
-  clusterUuidEndpoint: "http"
+discovery:
+  adminTLS: "http"
 ```
 
 ## Configuration reference
@@ -165,38 +167,37 @@ redpanda:
 | `alloy.name` | `collector` | Name of the Alloy instance and Kubernetes resources |
 | `alloy.namespace` | `redpanda` | Namespace to deploy the collector into |
 | `alloy.deploymentMode` | `alloy` | Deployment mode: `alloy` or `direct` |
-| `alloy.image` | `paulmw/alloy:v1.13.2-kafkarouter` | Alloy container image (direct mode only) |
+| `alloy.controllerType` | `StatefulSet` | Controller type for direct mode: `StatefulSet`, `Deployment`, or `DaemonSet` |
+| `alloy.replicas` | Redpanda StatefulSet count | Replica count (direct mode); defaults to the replica count of the discovered Redpanda StatefulSet |
+| `alloy.image` | `paulmw/alloy:v1.13.2-kafkarouter-11` | Alloy container image (direct mode only) |
 | `customer` | — | **Required.** Customer name used to construct topic names |
 | `credentials.secretName` | — | Name of the Kubernetes Secret containing `username` and `password` |
 | `gateway.enabled` | `false` | Enable gateway (OTLP HTTP) transport instead of direct Kafka |
 | `gateway.endpoint` | — | OTLP gateway endpoint URL |
+| `gateway.protocol` | `http` | Gateway protocol: `http` or `grpc` |
 | `gateway.tls.insecure` | `false` | Disable TLS (use plain HTTP) |
 | `gateway.tls.insecure_skip_verify` | `false` | Skip TLS certificate verification |
 | `gateway.credentials.secretName` | — | Gateway-specific credentials secret (falls back to `credentials.secretName`) |
 | `redpanda.bootstrapServer` | — | Kafka bootstrap server (direct mode) |
 | `redpanda.saslMechanism` | `SCRAM-SHA-256` | SASL mechanism: `SCRAM-SHA-256` or `SCRAM-SHA-512` |
-| `redpanda.clusterUuidEndpoint` | `https` | Protocol for admin API UUID fetch: `https` or `http` |
-| `redpanda.clusterUuidPod` | `redpanda-0.redpanda` | Pod and service name for UUID discovery |
-| `redpanda.clusterUuidPort` | `9644` | Admin API port |
-| `discovery.namespace` | `redpanda` | Namespace to discover Redpanda pods in |
+| `discovery.namespace` | Release namespace | Namespace to discover Redpanda pods in |
 | `discovery.labelSelector` | `app.kubernetes.io/name=redpanda` | Label selector for Redpanda pods |
-| `defaultTopics.enabled` | `false` | Enable fallback to default topics (direct mode only) |
-| `defaultTopics.failureThreshold` | `3` | Consecutive failures before switching to fallback topic |
-| `defaultTopics.retryInterval` | `30s` | How often to re-probe the primary topic after failover |
+| `discovery.adminPort` | `9644` | Redpanda admin API port, used for scrape discovery and UUID fetch |
+| `discovery.adminTLS` | `https` | Protocol for admin API: `https` or `http` |
+| `discovery.scrapeInterval` | `30s` | Prometheus scrape interval |
+| `discovery.scrapeTimeout` | `10s` | Prometheus scrape timeout |
+| `defaultTopics.enabled` | `true` | Enable fallback to default topics when the cluster-specific topic does not exist (direct mode only) |
 | `topics.metrics` | `{customer}-metrics-{cluster_uuid}` | Override metrics topic name |
 | `topics.logs` | `{customer}-logs-{cluster_uuid}` | Override logs topic name |
-| `scrape.interval` | `30s` | Prometheus scrape interval |
-| `scrape.timeout` | `10s` | Prometheus scrape timeout |
-| `scrape.adminPort` | `9644` | Redpanda admin API port for service discovery |
-| `batch.metricsBatchSize` | `5000` | Max metrics data points per batch |
+| `batch.metricsBatchMaxSize` | `5000` | Max metrics data points per batch |
 | `batch.logsBatchSize` | `10000` | Max log records per batch |
-| `batch.timeout` | `10s` | Max time to wait before sending a partial batch |
+| `batch.timeout` | `2s` (metrics) / `10s` (logs) | Max time to wait before flushing a partial batch |
 | `producer.metricsCompression` | `zstd` | Kafka producer compression for metrics |
 | `producer.logsCompression` | `zstd` | Kafka producer compression for logs |
 | `producer.metricsMaxMessageBytes` | `10485760` | Max Kafka message size for metrics (bytes) |
 | `producer.logsMaxMessageBytes` | `10485760` | Max Kafka message size for logs (bytes) |
 | `exportTimeout` | `30s` | Timeout for export requests |
-| `exportQueue.enabled` | `true` | Enable sending queue (gateway mode) |
+| `exportQueue.enabled` | `true` | Enable sending queue when `exportQueue` is configured (gateway mode) |
 | `exportQueue.metricsQueueSize` | `50000` | Queue depth for metrics (gateway mode) |
 | `exportQueue.logsQueueSize` | `50000` | Queue depth for logs (gateway mode) |
 | `exportQueue.numConsumers` | `20` | Concurrent queue consumers (gateway mode) |
@@ -214,6 +215,7 @@ alloy:
   name: collector
   namespace: redpanda
   deploymentMode: "direct"
+  controllerType: "StatefulSet"
 
 credentials:
   secretName: "customer-acme"
@@ -232,7 +234,7 @@ defaultTopics:
 
 ### Gateway (OTLP HTTP)
 
-Only use this when you don't have direct access to the Redpanda Cloud broker Kafka API.
+Use this when you don't have direct access to the Redpanda Cloud broker, or when centrally managing topic routing at the gateway.
 
 ```yaml
 customer: "acme"
@@ -259,18 +261,18 @@ gateway:
 
 ### Non-TLS admin API (self-managed or local clusters)
 
-If the Redpanda admin API is not TLS-enabled, set `clusterUuidEndpoint: "http"` to prevent a startup failure when the collector attempts HTTPS discovery.
+If the Redpanda admin API is not TLS-enabled, set `discovery.adminTLS: "http"` to prevent a startup failure when the collector attempts HTTPS discovery.
 
 ```yaml
-redpanda:
-  clusterUuidEndpoint: "http"
+discovery:
+  adminTLS: "http"
 ```
 
 ## Troubleshooting
 
 ### Collector fails to start with `json_decode unexpected end of JSON input`
 
-The collector could not fetch the cluster UUID from the admin API. This usually means the admin API is using plain HTTP but `clusterUuidEndpoint` is set to `https` (the default). Set `redpanda.clusterUuidEndpoint: "http"` in your values file.
+The collector could not fetch the cluster UUID from the admin API. This usually means the admin API is using plain HTTP but `discovery.adminTLS` is set to `https` (the default). Set `discovery.adminTLS: "http"` in your values file.
 
 ### No metrics appearing in Grafana
 
@@ -290,4 +292,4 @@ The collector could not fetch the cluster UUID from the admin API. This usually 
 
 ### Metrics stuck on default topics after cluster provisioning
 
-In direct mode with `defaultTopics.enabled: true`, the collector probes the cluster-specific topic every `defaultTopics.retryInterval` (default: 30 seconds). Once the topic exists, it switches back automatically. No restart is required.
+In direct mode with `defaultTopics.enabled: true`, the collector probes the cluster-specific topic every 60 seconds after switching to the fallback. Once the topic exists and 3 consecutive sends succeed, it switches back automatically. No restart is required.

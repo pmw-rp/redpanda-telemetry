@@ -19,8 +19,18 @@ alloy:
 
   # Deployment mode: "alloy" or "direct"
   # - alloy: Creates Alloy custom resource, requires Alloy operator (default)
-  # - direct: Creates Kubernetes resources directly (DaemonSet, ConfigMap, RBAC) without operator
+  # - direct: Creates Kubernetes resources directly (Deployment, ConfigMap, RBAC) without operator
   deploymentMode: "alloy"
+
+  # Controller type for the Alloy instance: "Deployment", "DaemonSet", or "StatefulSet"
+  # - StatefulSet: recommended — each pod gets a stable ordinal that maps 1-1 to a Redpanda broker
+  # - Deployment: single replicated collector, suitable when only one broker needs scraping
+  # - DaemonSet: one collector per node, only needed for host-level telemetry collection
+  controllerType: "StatefulSet"
+
+  # Number of replicas (only applies to Deployment and StatefulSet controller types)
+  # Defaults to the replica count of the discovered Redpanda StatefulSet, falling back to 1
+  # replicas: 1
 
   # Override the Alloy container image (optional)
   # Defaults to paulmw/alloy:v1.13.2-kafkarouter
@@ -64,62 +74,38 @@ credentials:
   # password: ""
 
 # ------------------------------------------------------------------------------
-# Gateway Configuration (OPTIONAL)
+# Redpanda Connection Configuration (REQUIRED for Kafka mode)
 # ------------------------------------------------------------------------------
-# When enabled, data is sent to Alloy Gateway via OTLP HTTP with Basic Auth
-# instead of directly to Kafka. Gateway handles routing to appropriate topics.
-gateway:
-  # Enable gateway mode
-  enabled: false
-
-  # Gateway OTLP endpoint
-  endpoint: "https://gateway.observability.cs.redpanda.com:443"
-
-  # Protocol for OTLP export (optional)
-  # Options: "http" (default), "grpc" (more efficient)
-  # Both protocols use Basic Auth via nginx for authentication
-  # Note: When using gRPC with TLS-terminating load balancers (like AWS NLB),
-  # the collector automatically disables ALPN enforcement to work around
-  # TLS termination limitations. This is safe when using authenticated endpoints.
-  # protocol: "grpc"
-
-  # TLS configuration for gateway endpoint
-  # tls:
-  #   insecure: false              # Use plaintext HTTP/gRPC instead of HTTPS/gRPCs
-  #   insecure_skip_verify: false  # Skip TLS certificate verification
-
-  # Gateway-specific authentication credentials (optional)
-  # If omitted, uses credentials from the main 'credentials' section
-  # Both HTTP and gRPC protocols require Basic Auth credentials
-  # credentials:
-  #   secretName: "customer-pmw"
-  #   # OR explicit credentials:
-  #   # username: "gateway-user"
-  #   # password: "gateway-password"
-
-# ------------------------------------------------------------------------------
-# Redpanda Connection Configuration (OPTIONAL)
-# ------------------------------------------------------------------------------
-# Configuration for direct-to-Kafka mode and cluster UUID discovery
+# Kafka bootstrap server and SASL settings for direct-to-Kafka export.
+# These are used when gateway.enabled is false (the default).
 redpanda:
-  # Kafka bootstrap server (for direct mode)
-  bootstrapServer: "seed-47aa9fc7.d61ib847ecku8d3si4c0.byoc.prd.cloud.redpanda.com:9092"
+  # Kafka bootstrap server
+  bootstrapServer: "CHANGEME:9092"
 
   # SASL authentication mechanism
   # Options: "SCRAM-SHA-256", "SCRAM-SHA-512"
   saslMechanism: "SCRAM-SHA-256"
 
-  # Cluster UUID discovery configuration
-  # Used to fetch cluster_id from Redpanda Admin API for dynamic topic construction
-  # Format: <pod-name>.<service-name> (namespace is auto-detected from discovery.namespace)
-  # clusterUuidPod: "redpanda-0.redpanda"  # Default: First pod of StatefulSet
-  # clusterUuidPort: "9644"                # Default: Admin API port
-
-  # Admin API protocol for cluster UUID discovery
-  # Options: "https" (default), "http"
-  # Set to "http" if your Redpanda cluster does not have TLS enabled on the admin API
-  # (e.g. self-managed clusters without TLS, or local development environments)
-  # clusterUuidEndpoint: "http"
+# ------------------------------------------------------------------------------
+# Gateway Configuration (OPTIONAL)
+# ------------------------------------------------------------------------------
+# When enabled, data is forwarded to an Alloy Gateway via OTLP HTTP/gRPC instead
+# of writing directly to Kafka. Useful when collectors cannot reach Kafka directly.
+#gateway:
+#  enabled: true
+#  endpoint: "https://gateway.observability.cs.redpanda.com:443"
+#
+#  # Protocol: "http" (default) or "grpc"
+#  # protocol: "grpc"
+#
+#  # TLS overrides (optional)
+#  # tls:
+#  #   insecure: false
+#  #   insecure_skip_verify: false
+#
+#  # Gateway credentials (optional — falls back to main credentials section)
+#  # credentials:
+#  #   secretName: "customer-gateway"
 
 # ------------------------------------------------------------------------------
 # Default Topics Failover Configuration (OPTIONAL - direct mode only)
@@ -130,20 +116,17 @@ redpanda:
 #   metrics: "{customer}-metrics-default"
 #   logs:    "{customer}-logs-default"
 # Once the cluster-specific topic is created, the collector switches back
-# automatically within ~30 seconds (controlled by retryInterval).
+# automatically within 10 seconds (3 consecutive failures → fallback, 10s retry interval).
+#
+# To disable:
 #defaultTopics:
 #  enabled: false
-#
-#  # Number of consecutive send failures before switching to fallback topic
-#  # failureThreshold: 3
-#
-#  # How often to re-probe the primary (cluster-specific) topic after failover
-#  # retryInterval: "30s"
 
 # ------------------------------------------------------------------------------
-# Kubernetes Pod Discovery Configuration (OPTIONAL)
+# Pod Discovery and Scrape Configuration (OPTIONAL)
 # ------------------------------------------------------------------------------
-# Configuration for discovering Redpanda pods to scrape metrics and collect logs
+# Configuration for discovering Redpanda pods, scraping metrics, and fetching
+# the cluster UUID from the Redpanda Admin API.
 discovery:
   # Namespace where Redpanda pods are running
   # Defaults to the same namespace where the collector is deployed
@@ -153,20 +136,20 @@ discovery:
   # Adjust if your Redpanda deployment uses different labels
   labelSelector: "app.kubernetes.io/name=redpanda"
 
-# ------------------------------------------------------------------------------
-# Scrape Configuration (OPTIONAL)
-# ------------------------------------------------------------------------------
-# Configuration for Prometheus metrics scraping from Redpanda pods
-# scrape:
+  # Admin API port for metrics collection and cluster UUID discovery
+  adminPort: 9644
+
+  # Admin API protocol for cluster UUID discovery
+  # Options: "https" (default), "http"
+  # Set to "http" if your Redpanda cluster does not have TLS enabled on the admin API
+  # (e.g. self-managed clusters without TLS, or local development environments)
+  adminTLS: "https"
+
   # Metrics scrape interval
-  # interval: "30s"
+  scrapeInterval: "30s"
 
   # Scrape timeout
-  # timeout: "10s"
-
-  # Admin API port for metrics collection
-  # Used in service discovery to target the correct port
-  # adminPort: 9644
+  scrapeTimeout: "10s"
 
 # ------------------------------------------------------------------------------
 # Batch Processing Configuration (OPTIONAL)
@@ -181,7 +164,7 @@ discovery:
   # logsBatchSize: 10000
 
   # Batch timeout - max time to wait before sending partial batch
-  # timeout: "10s"
+  # timeout: "2s"
 
 # ------------------------------------------------------------------------------
 # Producer Configuration (OPTIONAL)

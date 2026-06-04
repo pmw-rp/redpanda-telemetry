@@ -1,0 +1,97 @@
+{{- $deploymentMode := .Values.alloy.deploymentMode | default "alloy" }}
+{{- if eq $deploymentMode "direct" }}
+{{- $controllerType := .Values.alloy.controllerType | default "Deployment" }}
+{{- $appName := (split "=" .Values.discovery.labelSelector)._1 }}
+{{- $targetNamespace := .Values.discovery.namespace | default .Release.Namespace }}
+{{- $redpandaSts := lookup "apps/v1" "StatefulSet" $targetNamespace $appName }}
+{{- $replicas := .Values.alloy.replicas | default (($redpandaSts).spec).replicas | default 1 }}
+apiVersion: apps/v1
+kind: {{ $controllerType }}
+metadata:
+  name: {{ include "redpanda-o11y.alloyResourceName" . }}-alloy
+  namespace: {{ .Values.alloy.namespace }}
+  labels:
+    app.kubernetes.io/name: alloy
+    app.kubernetes.io/instance: {{ .Values.alloy.name }}
+    app.kubernetes.io/component: alloy
+spec:
+  {{- if ne $controllerType "DaemonSet" }}
+  replicas: {{ $replicas }}
+  {{- end }}
+  minReadySeconds: 10
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: alloy
+      app.kubernetes.io/instance: {{ .Values.alloy.name }}
+  template:
+    metadata:
+      annotations:
+        kubectl.kubernetes.io/default-container: alloy
+      labels:
+        app.kubernetes.io/name: alloy
+        app.kubernetes.io/instance: {{ .Values.alloy.name }}
+    spec:
+      serviceAccountName: {{ include "redpanda-o11y.alloyResourceName" . }}-alloy
+      containers:
+        # Main Alloy container
+        - name: alloy
+          image: {{ if .Values.alloy.image }}{{ .Values.alloy.image }}{{ else }}paulmw/alloy:v1.13.2-kafkarouter-11{{ end }}
+          imagePullPolicy: IfNotPresent
+          args:
+            - run
+            - /etc/alloy/config.alloy
+            - --storage.path=/tmp/alloy
+            - --server.http.listen-addr=0.0.0.0:12345
+            - --server.http.ui-path-prefix=/
+            - --stability.level=experimental
+            - --server.http.enable-pprof=true
+          env:
+            - name: ALLOY_DEPLOY_MODE
+              value: helm
+            - name: POD_INDEX
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.labels['apps.kubernetes.io/pod-index']
+{{- if and .Values.gateway .Values.gateway.enabled .Values.gateway.protocol (eq .Values.gateway.protocol "grpc") }}
+            # Disable ALPN enforcement for gRPC when using NLB with TLS termination
+            - name: GRPC_ENFORCE_ALPN_ENABLED
+              value: "false"
+{{- end }}
+          ports:
+            - name: http-metrics
+              containerPort: 12345
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /-/ready
+              port: 12345
+              scheme: HTTP
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 1
+            failureThreshold: 3
+            successThreshold: 1
+          volumeMounts:
+            - name: config
+              mountPath: /etc/alloy
+
+        # Config reloader sidecar
+        - name: config-reloader
+          image: quay.io/prometheus-operator/prometheus-config-reloader:v0.81.0
+          imagePullPolicy: IfNotPresent
+          args:
+            - --watched-dir=/etc/alloy
+            - --reload-url=http://localhost:12345/-/reload
+          resources:
+            requests:
+              cpu: 10m
+              memory: 50Mi
+          volumeMounts:
+            - name: config
+              mountPath: /etc/alloy
+
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "redpanda-o11y.alloyResourceName" . }}-alloy
+{{- end }}

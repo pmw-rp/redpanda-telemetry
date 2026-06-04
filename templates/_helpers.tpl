@@ -49,6 +49,14 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 
 {{/*
+Alloy resource name — combines alloy.name and alloy.namespace to ensure
+cluster-scoped resources (ClusterRole, ClusterRoleBinding) are unique per install.
+*/}}
+{{- define "redpanda-o11y.alloyResourceName" -}}
+{{- printf "%s-%s" .Values.alloy.name .Values.alloy.namespace }}
+{{- end }}
+
+{{/*
 Kafka broker address
 */}}
 {{- define "redpanda-o11y.kafkaBroker" -}}
