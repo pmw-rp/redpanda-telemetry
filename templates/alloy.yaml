@@ -590,10 +590,10 @@ spec:
             regex  = "container_runtime"
           }
 
-          // Drop logs where instance doesn't end with "redpanda"
+          // Only keep logs from the main redpanda container, not sidecars
           rule {
-            source_labels = ["instance"]
-            regex         = "^(.*redpanda)$"
+            source_labels = ["container"]
+            regex         = "^redpanda$"
             action        = "keep"
           }
 
