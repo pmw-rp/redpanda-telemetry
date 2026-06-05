@@ -593,7 +593,7 @@ spec:
           // Only keep logs from the main redpanda container, not sidecars
           rule {
             source_labels = ["container"]
-            regex         = "^{{ $appName }}$"
+            regex         = "^{{ .Values.discovery.containerName | default "redpanda" }}$"
             action        = "keep"
           }
 

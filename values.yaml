@@ -136,6 +136,12 @@ discovery:
   # Adjust if your Redpanda deployment uses different labels
   labelSelector: "app.kubernetes.io/name=redpanda"
 
+  # Name of the Redpanda container within the pod. Used to filter logs to only the
+  # main Redpanda container and exclude any sidecars. Defaults to "redpanda" which
+  # is correct for the standard Redpanda Helm chart. Override if your chart names
+  # the container differently (e.g. after the Helm release name).
+  # containerName: "redpanda"
+
   # Override the app name used to build the admin API URL and pod regex for scraping.
   # By default this is derived from the label selector value (e.g. "redpanda" from
   # "app.kubernetes.io/name=redpanda"). Set this when the StatefulSet and headless
