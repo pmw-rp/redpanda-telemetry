@@ -486,7 +486,7 @@ data:
           // Only keep logs from the main redpanda container, not sidecars
           rule {
             source_labels = ["container"]
-            regex         = "^redpanda$"
+            regex         = "^{{ $appName }}$"
             action        = "keep"
           }
 
