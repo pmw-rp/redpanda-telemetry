@@ -4,7 +4,7 @@ A Helm chart that deploys a [Grafana Alloy](https://grafana.com/docs/alloy/lates
 
 ## Overview
 
-The collector discovers Redpanda pods in a configured namespace, scrapes their admin API metrics endpoints (`/metrics` and `/public_metrics`), and collects container logs. It automatically fetches the cluster UUID from the Redpanda admin API and attaches it as a `cluster_id` resource attribute on all telemetry, enabling per-cluster routing downstream.
+The collector discovers Redpanda pods across one or more configured namespaces, scrapes their admin API metrics endpoints (`/metrics` and `/public_metrics`), and collects container logs. During discovery, each pod is queried directly for its cluster UUID, which is attached as a `cluster_id` resource attribute on all telemetry from that pod — this works correctly even when multiple Redpanda clusters are discovered by the same collector.
 
 Telemetry is forwarded using one of two transport modes:
 
@@ -25,14 +25,14 @@ The chart supports two deployment modes, controlled by `alloy.deploymentMode`.
 
 ### `direct` (recommended)
 
-Creates Kubernetes resources directly — a StatefulSet (or Deployment/DaemonSet, controlled by `alloy.controllerType`), ConfigMap, ServiceAccount, and RBAC — without requiring the Alloy operator. This is the simpler option and works on any Kubernetes cluster.
+Creates Kubernetes resources directly — a StatefulSet, ConfigMap, ServiceAccount, and RBAC — without requiring the Alloy operator. This is the simpler option and works on any Kubernetes cluster.
 
-StatefulSet is the recommended controller type: each pod gets a stable ordinal that maps 1-to-1 to a Redpanda broker, so each collector instance scrapes and ships telemetry only for its paired broker.
+The collector always runs as a StatefulSet: every discovered Redpanda pod (across all configured `discovery.namespaces`) is assigned a stable global ordinal, and collector pod `N` scrapes only the Redpanda pods whose ordinal modulo `alloy.replicas` equals `N`. Set `alloy.replicas` to the total number of brokers being monitored across all namespaces for an even, non-overlapping 1-to-1 split; a smaller value shards multiple brokers onto each collector pod instead.
 
 ```yaml
 alloy:
   deploymentMode: "direct"
-  controllerType: "StatefulSet"
+  replicas: 3
 ```
 
 ### `alloy`
@@ -51,11 +51,11 @@ alloy:
 The collector writes telemetry directly to Redpanda Cloud Kafka topics. Topics are named dynamically using the customer name and cluster UUID:
 
 ```
-{customer}-metrics-{cluster_uuid}
-{customer}-logs-{cluster_uuid}
+{customer}-metrics-{cluster_id}
+{customer}-logs-{cluster_id}
 ```
 
-The cluster UUID is fetched at startup from the Redpanda admin API (`/v1/cluster/uuid`) and attached to all telemetry as `cluster_id`.
+The cluster UUID is discovered per-pod (see [Cluster UUID discovery](#cluster-uuid-discovery) below) and attached to all telemetry as `cluster_id`.
 
 ```yaml
 gateway:
@@ -66,16 +66,9 @@ redpanda:
   saslMechanism: "SCRAM-SHA-256"
 ```
 
-#### Default topic failover
+#### Default topic fallback
 
-When `defaultTopics.enabled` is set to `true`, the collector routes to the cluster-specific topic by default but automatically falls back to `{customer}-metrics-default` / `{customer}-logs-default` if the cluster-specific topic does not exist. This is useful when a cluster is not yet provisioned in the observability backend.
-
-The collector switches to the fallback after 3 consecutive failures and re-probes the primary topic every 60 seconds. Once the cluster-specific topic is created, the collector switches back automatically — no restart required.
-
-```yaml
-defaultTopics:
-  enabled: true
-```
+Every produce attempt tries the cluster-specific topic first. If that produce fails (e.g. because the cluster isn't yet provisioned in the observability backend and the topic doesn't exist), the collector retries that same batch on `{customer}-metrics-default` / `{customer}-logs-default`. This is always on and isn't configurable — there's no `defaultTopics.enabled` toggle. Once the cluster-specific topic exists, the very next produce succeeds against it directly; there's no sticky fallback state to reset or wait out.
 
 ### Gateway (OTLP HTTP)
 
@@ -147,11 +140,7 @@ If `gateway.credentials` is not set, the collector uses the main `credentials` s
 
 ## Cluster UUID discovery
 
-The collector fetches the Redpanda cluster UUID from the admin API at startup. By default it uses HTTPS:
-
-```
-https://redpanda-0.redpanda.<namespace>.svc.cluster.local:9644/v1/cluster/uuid
-```
+During pod discovery, the collector queries each discovered Redpanda pod's own admin API directly (`https://<pod-ip>:9644/v1/cluster/uuid` by default) for its cluster UUID. Each pod is enriched with its own UUID individually, so multiple Redpanda clusters can be discovered and routed correctly by the same collector, even when they share a namespace. UUIDs are cached for the lifetime of the collector process, since a cluster's UUID never changes.
 
 If your Redpanda cluster does not have TLS enabled on the admin API, set `discovery.adminTLS` to `"http"`:
 
@@ -167,9 +156,11 @@ discovery:
 | `alloy.name` | `collector` | Name of the Alloy instance and Kubernetes resources |
 | `alloy.namespace` | `redpanda` | Namespace to deploy the collector into |
 | `alloy.deploymentMode` | `alloy` | Deployment mode: `alloy` or `direct` |
-| `alloy.controllerType` | `StatefulSet` | Controller type for direct mode: `StatefulSet`, `Deployment`, or `DaemonSet` |
-| `alloy.replicas` | Redpanda StatefulSet count | Replica count (direct mode); defaults to the replica count of the discovered Redpanda StatefulSet |
-| `alloy.image` | `paulmw/alloy:v1.13.2-kafkarouter-11` | Alloy container image (direct mode only) |
+| `alloy.replicas` | `3` | Replica count. Set this to the total number of brokers being monitored across all `discovery.namespaces` — see [Deployment modes](#direct-recommended) |
+| `alloy.logLevel` | `info` | Alloy's own log level: `error`, `warn`, `info`, or `debug` |
+| `alloy.liveDebugging` | `false` | Enable the Alloy UI's live data inspector. Not recommended for production |
+| `alloy.maxUnavailable` | `alloy.replicas` | Max pods unavailable during a rolling update (StatefulSet only) |
+| `alloy.image` | `paulmw/alloy:v1.17.1-rp` | Alloy container image. Must be built from this fork (or a later release of it) — a stock/upstream Alloy image won't have the custom components this chart depends on |
 | `customer` | — | **Required.** Customer name used to construct topic names |
 | `credentials.secretName` | — | Name of the Kubernetes Secret containing `username` and `password` |
 | `gateway.enabled` | `false` | Enable gateway (OTLP HTTP) transport instead of direct Kafka |
@@ -180,35 +171,29 @@ discovery:
 | `gateway.credentials.secretName` | — | Gateway-specific credentials secret (falls back to `credentials.secretName`) |
 | `redpanda.bootstrapServer` | — | Kafka bootstrap server (direct mode) |
 | `redpanda.saslMechanism` | `SCRAM-SHA-256` | SASL mechanism: `SCRAM-SHA-256` or `SCRAM-SHA-512` |
-| `discovery.namespace` | Release namespace | Namespace to discover Redpanda pods in |
+| `discovery.namespaces` | `[<release namespace>]` | List of namespaces to discover Redpanda pods in. Add multiple entries to monitor several clusters with one collector |
 | `discovery.labelSelector` | `app.kubernetes.io/name=redpanda` | Label selector for Redpanda pods |
-| `discovery.adminPort` | `9644` | Redpanda admin API port, used for scrape discovery and UUID fetch |
-| `discovery.containerName` | `redpanda` | Name of the Redpanda container within the pod, used to filter logs and exclude sidecars. Override if your Helm chart names the container after the release name rather than using the standard `redpanda` name |
-| `discovery.appName` | derived from `labelSelector` | Override the StatefulSet/service name used to build the admin API URL and pod scrape regex. Set this when the Helm release name differs from the label value (e.g. `redpanda-sandbox`) |
+| `discovery.adminPort` | `9644` | Redpanda admin API port, used for scrape discovery and per-pod UUID lookup |
 | `discovery.adminTLS` | `https` | Protocol for admin API: `https` or `http` |
 | `discovery.scrapeInterval` | `30s` | Prometheus scrape interval |
 | `discovery.scrapeTimeout` | `10s` | Prometheus scrape timeout |
-| `defaultTopics.enabled` | `true` | Enable fallback to default topics when the cluster-specific topic does not exist (direct mode only) |
-| `topics.metrics` | `{customer}-metrics-{cluster_uuid}` | Override metrics topic name |
-| `topics.logs` | `{customer}-logs-{cluster_uuid}` | Override logs topic name |
+| `logs.parseSeverity` | `true` | Parse a `TRACE`/`DEBUG`/`INFO`/`WARN`/`ERROR`/`FATAL` prefix out of the log body and set it as the OTLP severity. Disable on very high-volume clusters where the per-record cost is measurable |
 | `batch.metricsBatchMaxSize` | `5000` | Max metrics data points per batch |
 | `batch.logsBatchSize` | `10000` | Max log records per batch |
-| `batch.timeout` | `2s` (metrics) / `10s` (logs) | Max time to wait before flushing a partial batch |
-| `producer.metricsCompression` | `zstd` | Kafka producer compression for metrics |
-| `producer.logsCompression` | `zstd` | Kafka producer compression for logs |
-| `producer.metricsMaxMessageBytes` | `10485760` | Max Kafka message size for metrics (bytes) |
-| `producer.logsMaxMessageBytes` | `10485760` | Max Kafka message size for logs (bytes) |
-| `exportTimeout` | `30s` | Timeout for export requests |
+| `batch.timeout` | `2s` | Max time to wait before flushing a partial batch (shared by metrics and logs) |
+| `producer.maxBatchBytes` | `10485760` | Max Kafka RecordBatch size in bytes (direct mode). Must not exceed the broker's `kafka_batch_max_bytes` |
 | `exportQueue.enabled` | `true` | Enable sending queue when `exportQueue` is configured (gateway mode) |
 | `exportQueue.metricsQueueSize` | `50000` | Queue depth for metrics (gateway mode) |
 | `exportQueue.logsQueueSize` | `50000` | Queue depth for logs (gateway mode) |
 | `exportQueue.numConsumers` | `20` | Concurrent queue consumers (gateway mode) |
 
+Compression for direct-mode Kafka export is not currently exposed as a value — it's fixed at `zstd`.
+
 ## Examples
 
-### Direct to Kafka, with default topic failover
+### Direct to Kafka
 
-Use this for a cluster that may not yet be provisioned in the observability backend. Telemetry falls back to `{customer}-metrics-default` until the cluster-specific topic is created.
+Telemetry is routed to the cluster-specific topic, falling back to `{customer}-metrics-default` / `{customer}-logs-default` if that cluster isn't yet provisioned in the observability backend — see [Default topic fallback](#default-topic-fallback).
 
 ```yaml
 customer: "acme"
@@ -217,21 +202,47 @@ alloy:
   name: collector
   namespace: redpanda
   deploymentMode: "direct"
-  controllerType: "StatefulSet"
+  replicas: 3
 
 credentials:
   secretName: "customer-acme"
 
 discovery:
-  namespace: redpanda
+  namespaces:
+    - redpanda
   labelSelector: "app.kubernetes.io/name=redpanda"
 
 redpanda:
   bootstrapServer: "seed-xxxxx.xxxxxxxxxxxxxxxx.byoc.prd.cloud.redpanda.com:9092"
   saslMechanism: "SCRAM-SHA-256"
+```
 
-defaultTopics:
-  enabled: true
+### Direct to Kafka, monitoring multiple clusters
+
+One collector can discover and route telemetry for several Redpanda clusters at once. Set `alloy.replicas` to the total broker count across all of them for an even, non-overlapping shard.
+
+```yaml
+customer: "acme"
+
+alloy:
+  name: collector
+  namespace: collector
+  deploymentMode: "direct"
+  replicas: 9 # 3 clusters x 3 brokers each
+
+credentials:
+  secretName: "customer-acme"
+
+discovery:
+  namespaces:
+    - cluster-a
+    - cluster-b
+    - cluster-c
+  labelSelector: "app.kubernetes.io/component=redpanda"
+
+redpanda:
+  bootstrapServer: "seed-xxxxx.xxxxxxxxxxxxxxxx.byoc.prd.cloud.redpanda.com:9092"
+  saslMechanism: "SCRAM-SHA-256"
 ```
 
 ### Gateway (OTLP HTTP)
@@ -250,7 +261,8 @@ credentials:
   secretName: "customer-acme"
 
 discovery:
-  namespace: redpanda
+  namespaces:
+    - redpanda
   labelSelector: "app.kubernetes.io/name=redpanda"
 
 gateway:
@@ -272,9 +284,15 @@ discovery:
 
 ## Troubleshooting
 
-### Collector fails to start with `json_decode unexpected end of JSON input`
+### Pods discovered but missing `cluster_id` / no telemetry from a specific cluster
 
-The collector could not fetch the cluster UUID from the admin API. This usually means the admin API is using plain HTTP but `discovery.adminTLS` is set to `https` (the default). Set `discovery.adminTLS: "http"` in your values file.
+Look for `failed to fetch cluster UUID` warnings in the collector logs:
+
+```sh
+kubectl logs -n <namespace> -l app.kubernetes.io/name=alloy -c alloy | grep "cluster UUID"
+```
+
+A pod that can't be reached on `discovery.adminPort`, or that gets `http: server gave HTTP response to HTTPS client` in the `err` field, has a TLS mismatch — the admin API is plain HTTP but `discovery.adminTLS` is `https` (the default). Set `discovery.adminTLS: "http"` in your values file. Targets with an unresolved UUID are excluded from scraping/log collection (with a warning), not fatal — the collector keeps running and shipping telemetry for every other pod.
 
 ### No metrics appearing in Grafana
 
@@ -292,6 +310,6 @@ The collector could not fetch the cluster UUID from the admin API. This usually 
 
 4. In gateway mode, verify the gateway endpoint is reachable and the credentials are correct.
 
-### Metrics stuck on default topics after cluster provisioning
+### Metrics landing on `-default` topics after cluster provisioning
 
-In direct mode with `defaultTopics.enabled: true`, the collector probes the cluster-specific topic every 60 seconds after switching to the fallback. Once the topic exists and 3 consecutive sends succeed, it switches back automatically. No restart is required.
+This is expected during the window before a cluster's topics are provisioned — see [Default topic fallback](#default-topic-fallback). There's no persistent fallback state: once the cluster-specific topic exists, the next produce attempt goes straight to it. No restart is required.

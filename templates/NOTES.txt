@@ -13,8 +13,8 @@ Customer: {{ .Values.customer }}
   → Used to construct default topic names
 
 Cluster ID Discovery:
-  → Automatically fetched from Redpanda API (/v1/cluster/uuid)
-  → Attached as cluster_id resource attribute to all telemetry
+  → Each discovered Redpanda pod is queried individually (/v1/cluster/uuid)
+  → Attached as cluster_id resource attribute to all telemetry from that pod
 
 {{- if .Values.gateway }}{{- if .Values.gateway.enabled }}
 
@@ -31,31 +31,25 @@ Direct Mode:
 {{- end }}{{- end }}
 
 Topics:
-{{- if .Values.topics }}{{- if .Values.topics.metrics }}
-  → Metrics: {{ .Values.topics.metrics }} (explicit)
-{{- else }}
-  → Metrics: {{ .Values.customer }}-metrics-{cluster_id} (dynamic)
-{{- end }}{{- else }}
-  → Metrics: {{ .Values.customer }}-metrics-{cluster_id} (dynamic)
-{{- end }}
-{{- if .Values.topics }}{{- if .Values.topics.logs }}
-  → Logs: {{ .Values.topics.logs }} (explicit)
-{{- else }}
-  → Logs: {{ .Values.customer }}-logs-{cluster_id} (dynamic)
-{{- end }}{{- else }}
-  → Logs: {{ .Values.customer }}-logs-{cluster_id} (dynamic)
-{{- end }}
+  → Metrics: {{ .Values.customer }}-metrics-{cluster_id} (falls back to {{ .Values.customer }}-metrics-default)
+  → Logs: {{ .Values.customer }}-logs-{cluster_id} (falls back to {{ .Values.customer }}-logs-default)
 
 Source Discovery:
-  → Namespace: {{ if .Values.discovery }}{{ .Values.discovery.namespace }}{{ else }}{{ .Release.Namespace }}{{ end }}
-  → Label Selector: {{ if .Values.discovery }}{{ .Values.discovery.labelSelector }}{{ else }}app.kubernetes.io/name=redpanda{{ end }}
+{{- $nslist := (.Values.discovery).namespaces | default (list .Release.Namespace) }}
+  → Namespaces: {{ join ", " $nslist }}
+  → Label Selector: {{ (.Values.discovery).labelSelector | default "app.kubernetes.io/name=redpanda" }}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 Next Steps:
 
+{{- if eq (.Values.alloy.deploymentMode | default "alloy") "direct" }}
 1. Check the Alloy collector status:
-   kubectl get alloy {{ .Values.alloy.name }} -n {{ .Values.alloy.namespace }}
+   kubectl get {{ .Values.alloy.controllerType | default "Deployment" }} {{ include "redpanda-o11y.alloyResourceName" . }}-alloy -n {{ .Values.alloy.namespace }}
+{{- else }}
+1. Check the Alloy collector status:
+   kubectl get alloy {{ include "redpanda-o11y.alloyResourceName" . }} -n {{ .Values.alloy.namespace }}
+{{- end }}
 
 2. Verify the Alloy pods are running:
    kubectl get pods -n {{ .Values.alloy.namespace }} -l app.kubernetes.io/name=alloy
@@ -73,7 +67,10 @@ Troubleshooting:
 If you encounter issues:
 
 • Verify Redpanda pods exist:
-  kubectl get pods -n {{ if .Values.discovery }}{{ .Values.discovery.namespace }}{{ else }}{{ .Release.Namespace }}{{ end }} -l {{ if .Values.discovery }}{{ .Values.discovery.labelSelector }}{{ else }}app.kubernetes.io/name=redpanda{{ end }}
+{{- $nslist2 := (.Values.discovery).namespaces | default (list .Release.Namespace) }}
+{{- range $nslist2 }}
+  kubectl get pods -n {{ . }} -l {{ ($.Values.discovery).labelSelector | default "app.kubernetes.io/name=redpanda" }}
+{{- end }}
 
 • Check authentication:
   - Verify customer credentials secret exists in namespace {{ .Values.alloy.namespace }}

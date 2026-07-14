@@ -1,12 +1,9 @@
 {{- $deploymentMode := .Values.alloy.deploymentMode | default "alloy" }}
 {{- if eq $deploymentMode "direct" }}
-{{- $controllerType := .Values.alloy.controllerType | default "Deployment" }}
-{{- $appName := (split "=" .Values.discovery.labelSelector)._1 }}
-{{- $targetNamespace := .Values.discovery.namespace | default .Release.Namespace }}
-{{- $redpandaSts := lookup "apps/v1" "StatefulSet" $targetNamespace $appName }}
-{{- $replicas := .Values.alloy.replicas | default (($redpandaSts).spec).replicas | default 1 }}
-apiVersion: apps/v1
-kind: {{ $controllerType }}
+{{- $namespaces := .Values.discovery.namespaces | default (list .Release.Namespace) }}
+{{- $replicas := .Values.alloy.replicas | default 3 }}
+apiVersion: v1
+kind: Service
 metadata:
   name: {{ include "redpanda-o11y.alloyResourceName" . }}-alloy
   namespace: {{ .Values.alloy.namespace }}
@@ -15,9 +12,31 @@ metadata:
     app.kubernetes.io/instance: {{ .Values.alloy.name }}
     app.kubernetes.io/component: alloy
 spec:
-  {{- if ne $controllerType "DaemonSet" }}
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: alloy
+    app.kubernetes.io/instance: {{ .Values.alloy.name }}
+  ports:
+    - name: http-metrics
+      port: 12345
+      targetPort: 12345
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "redpanda-o11y.alloyResourceName" . }}-alloy
+  namespace: {{ .Values.alloy.namespace }}
+  labels:
+    app.kubernetes.io/name: alloy
+    app.kubernetes.io/instance: {{ .Values.alloy.name }}
+    app.kubernetes.io/component: alloy
+spec:
   replicas: {{ $replicas }}
-  {{- end }}
+  podManagementPolicy: Parallel
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: {{ .Values.alloy.maxUnavailable | default $replicas }}
   minReadySeconds: 10
   selector:
     matchLabels:
@@ -35,7 +54,7 @@ spec:
       containers:
         # Main Alloy container
         - name: alloy
-          image: {{ if .Values.alloy.image }}{{ .Values.alloy.image }}{{ else }}paulmw/alloy:v1.13.2-kafkarouter-11{{ end }}
+          image: {{ if .Values.alloy.image }}{{ .Values.alloy.image }}{{ else }}paulmw/alloy:v1.17.1-rp{{ end }}
           imagePullPolicy: IfNotPresent
           args:
             - run
@@ -52,10 +71,50 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.labels['apps.kubernetes.io/pod-index']
+{{- if .Values.credentials.secretName }}
+            - name: KAFKA_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.credentials.secretName }}
+                  key: username
+            - name: KAFKA_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.credentials.secretName }}
+                  key: password
+{{- else }}
+            - name: KAFKA_USERNAME
+              value: {{ .Values.credentials.username | quote }}
+            - name: KAFKA_PASSWORD
+              value: {{ .Values.credentials.password | quote }}
+{{- end }}
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
 {{- if and .Values.gateway .Values.gateway.enabled .Values.gateway.protocol (eq .Values.gateway.protocol "grpc") }}
             # Disable ALPN enforcement for gRPC when using NLB with TLS termination
             - name: GRPC_ENFORCE_ALPN_ENABLED
               value: "false"
+{{- end }}
+{{- if and .Values.gateway .Values.gateway.credentials }}
+{{- if .Values.gateway.credentials.secretName }}
+            - name: GATEWAY_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.gateway.credentials.secretName }}
+                  key: username
+            - name: GATEWAY_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.gateway.credentials.secretName }}
+                  key: password
+{{- else }}
+            - name: GATEWAY_USERNAME
+              value: {{ .Values.gateway.credentials.username | quote }}
+            - name: GATEWAY_PASSWORD
+              value: {{ .Values.gateway.credentials.password | quote }}
+{{- end }}
 {{- end }}
           ports:
             - name: http-metrics

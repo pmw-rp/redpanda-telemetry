@@ -1,17 +1,16 @@
 {{- $deploymentMode := .Values.alloy.deploymentMode | default "alloy" }}
 {{- if eq $deploymentMode "alloy" }}
 {{- $adminTLS := .Values.discovery.adminTLS | default "https" }}
-{{- $appName := .Values.discovery.appName | default (split "=" .Values.discovery.labelSelector)._1 }}
-{{- $namespace := .Values.discovery.namespace | default .Release.Namespace }}
+{{- $namespaces := .Values.discovery.namespaces | default (list .Release.Namespace) }}
 {{- $adminPort := .Values.discovery.adminPort | default 9644 }}
-{{- $defaultTopicsEnabled := not (eq ((index (.Values.defaultTopics | default dict) "enabled") | toString) "false") }}
+{{- $parseSeverity := ne ((.Values.logs).parseSeverity | toString) "false" }}
 apiVersion: collectors.grafana.com/v1alpha1
 kind: Alloy
 metadata:
   name: {{ include "redpanda-o11y.alloyResourceName" . }}
   namespace: {{ .Values.alloy.namespace }}
 spec:
-  {{- $defaultImage := "paulmw/alloy:v1.13.2-kafkarouter-9" }}
+  {{- $defaultImage := "paulmw/alloy:v1.17.1-rp" }}
   {{- $imageStr := .Values.alloy.image | default $defaultImage }}
   {{- $imageParts := splitList ":" $imageStr }}
   image:
@@ -19,17 +18,12 @@ spec:
     repository: {{ first $imageParts }}
     tag: {{ last $imageParts }}
   controller:
-    type: {{ .Values.alloy.controllerType | default "statefulset" | lower }}
-    {{- if ne (.Values.alloy.controllerType | default "statefulset" | lower) "daemonset" }}
-    {{- $redpandaSts := lookup "apps/v1" "StatefulSet" $namespace $appName }}
-    {{- if .Values.alloy.replicas }}
-    replicas: {{ .Values.alloy.replicas }}
-    {{- else if $redpandaSts }}
-    replicas: {{ $redpandaSts.spec.replicas | default 1 }}
-    {{- else }}
-    replicas: 1
-    {{- end }}
-    {{- end }}
+    type: statefulset
+    replicas: {{ .Values.alloy.replicas | default 3 }}
+  clustering:
+    enabled: true
+    name: {{ include "redpanda-o11y.alloyResourceName" . }}
+    portName: http-metrics
   alloy:
     stabilityLevel: experimental
     extraEnv:
@@ -37,19 +31,65 @@ spec:
         valueFrom:
           fieldRef:
             fieldPath: metadata.labels['apps.kubernetes.io/pod-index']
+{{- if .Values.credentials.secretName }}
+      - name: KAFKA_USERNAME
+        valueFrom:
+          secretKeyRef:
+            name: {{ .Values.credentials.secretName }}
+            key: username
+      - name: KAFKA_PASSWORD
+        valueFrom:
+          secretKeyRef:
+            name: {{ .Values.credentials.secretName }}
+            key: password
+{{- else }}
+      - name: KAFKA_USERNAME
+        value: {{ .Values.credentials.username | quote }}
+      - name: KAFKA_PASSWORD
+        value: {{ .Values.credentials.password | quote }}
+{{- end }}
 {{- if and .Values.gateway .Values.gateway.enabled .Values.gateway.protocol (eq .Values.gateway.protocol "grpc") }}
       - name: GRPC_ENFORCE_ALPN_ENABLED
         value: "false"
 {{- end }}
+{{- if and .Values.gateway .Values.gateway.credentials }}
+{{- if .Values.gateway.credentials.secretName }}
+      - name: GATEWAY_USERNAME
+        valueFrom:
+          secretKeyRef:
+            name: {{ .Values.gateway.credentials.secretName }}
+            key: username
+      - name: GATEWAY_PASSWORD
+        valueFrom:
+          secretKeyRef:
+            name: {{ .Values.gateway.credentials.secretName }}
+            key: password
+{{- else }}
+      - name: GATEWAY_USERNAME
+        value: {{ .Values.gateway.credentials.username | quote }}
+      - name: GATEWAY_PASSWORD
+        value: {{ .Values.gateway.credentials.password | quote }}
+{{- end }}
+{{- end }}
     configMap:
       content: |
+        logging {
+          level  = {{ .Values.alloy.logLevel | default "info" | quote }}
+          format = "logfmt"
+        }
+        {{- if .Values.alloy.liveDebugging }}
+
+        livedebugging {
+          enabled = true
+        }
+        {{- end }}
 
         // Discover Kubernetes pods with metrics endpoints
         discovery.kubernetes "pods" {
           role = "pod"
 
           namespaces {
-            names = [{{ .Values.discovery.namespace | default .Release.Namespace | quote }}]
+            names = [{{ range $i, $ns := $namespaces }}{{ if $i }}, {{ end }}{{ $ns | quote }}{{ end }}]
           }
 
           selectors {
@@ -58,22 +98,29 @@ spec:
           }
         }
 
+        // Enrich each discovered pod with its Redpanda cluster ID by querying
+        // the admin API.  The cluster_id label is carried through all downstream
+        // relabeling and scraping so each cluster's telemetry can be routed to its
+        // own Kafka topic without a shared remote.http fetch.
+        discovery.redpanda "pods" {
+          targets    = discovery.kubernetes.pods.targets
+          admin_port = {{ $adminPort }}
+          num_shards = {{ .Values.alloy.replicas | default 3 }}
+          {{- if eq $adminTLS "https" }}
+          tls_enabled     = true
+          tls_skip_verify = true
+          {{- end }}
+        }
+
         // Relabel discovered targets to only scrape annotated pods
         discovery.relabel "kubernetes_pods" {
-          targets = discovery.kubernetes.pods.targets
+          targets = discovery.redpanda.pods.targets
 
           // Only scrape pods with the Redpanda admin port
           rule {
             source_labels = ["__meta_kubernetes_pod_container_port_number"]
             action        = "keep"
             regex         = {{ .Values.discovery.adminPort | default 9644 | quote }}
-          }
-
-          // Keep only the pod matching this instance's ordinal
-          rule {
-            source_labels = ["__meta_kubernetes_pod_name"]
-            action        = "keep"
-            regex         = ".+-" + env("POD_INDEX")
           }
 
           // Label creation - "namespace" field from "__meta_kubernetes_namespace"
@@ -145,6 +192,15 @@ spec:
             replacement  = "metrics"
           }
 
+          // Shard targets: each collector pod scrapes only the Redpanda pod
+          // whose global ordinal (assigned by discovery.redpanda) matches
+          // this collector's own StatefulSet index.
+          rule {
+            source_labels = ["__tmp_pod_ordinal"]
+            regex         = env("POD_INDEX")
+            action        = "keep"
+          }
+
         }
 
         // Relabel discovered targets for /public_metrics endpoint
@@ -164,13 +220,18 @@ spec:
           }
         }
 
-        {{- if .Values.gateway }}{{- if .Values.gateway.enabled }}
+        {{- if and .Values.gateway .Values.gateway.enabled }}
         // Basic Auth for Gateway
         otelcol.auth.basic "gateway" {
-          username = {{ include "redpanda-o11y.gatewayUsername" . | quote }}
-          password = {{ include "redpanda-o11y.gatewayPassword" . | quote }}
+          {{- if .Values.gateway.credentials }}
+          username = env("GATEWAY_USERNAME")
+          password = env("GATEWAY_PASSWORD")
+          {{- else }}
+          username = env("KAFKA_USERNAME")
+          password = env("KAFKA_PASSWORD")
+          {{- end }}
         }
-        {{- end }}{{- end }}
+        {{- end }}
 
         // Scrape metrics from discovered pods
         {{- if eq $adminTLS "https" }}
@@ -211,20 +272,6 @@ spec:
         }
         {{- end }}
 
-        // Fetch cluster UUID from paired Redpanda broker
-        remote.http "cluster_uuid" {
-          url = "{{ $adminTLS }}://{{ $appName }}-" + env("POD_INDEX") + ".{{ $appName }}.{{ $namespace }}.svc.cluster.local:{{ $adminPort }}/v1/cluster/uuid"
-          {{- if eq $adminTLS "https" }}
-          client {
-            tls_config {
-              insecure_skip_verify = true
-            }
-          }
-          {{- end }}
-          poll_frequency = "5m"
-          poll_timeout   = "10s"
-        }
-
         // Convert Prometheus metrics to OpenTelemetry format
         otelcol.receiver.prometheus "default" {
           output {
@@ -232,51 +279,44 @@ spec:
           }
         }
 
-        // Add cluster_id as a resource attribute using dynamic UUID
+        // Promote cluster_id (scraped as a metric label from the discovery target)
+        // to the resource attribute used for Kafka topic routing.
         otelcol.processor.transform "add_cluster_id" {
           error_mode = "ignore"
 
           metric_statements {
-            context = "resource"
+            context = "datapoint"
             statements = [
-              `set(attributes["cluster_id"], "` + json_decode(remote.http.cluster_uuid.content)["cluster_uuid"] + `")`,
+              `set(resource.attributes["cluster_id"], datapoint.attributes["cluster_id"])`,
+              `delete_key(datapoint.attributes, "cluster_id")`,
             ]
           }
 
           output {
-            metrics = [otelcol.processor.batch.default.input]
+            metrics = [otelcol.processor.metricsbatcher.default.input]
           }
         }
 
-        // Batch processing for efficiency
-        otelcol.processor.batch "default" {
-          send_batch_size     = {{ if .Values.batch }}{{ .Values.batch.metricsBatchSize }}{{ else }}5000{{ end }}
+        // Metrics-batch processing: keeps all data points for the same (resource, metric name)
+        // together so that Prometheus histogram families (_bucket/_sum/_count) are never
+        // split across separate Kafka messages.
+        otelcol.processor.metricsbatcher "default" {
           send_batch_max_size = {{ if .Values.batch }}{{ .Values.batch.metricsBatchMaxSize }}{{ else }}5000{{ end }}
           timeout             = {{ if .Values.batch }}{{ .Values.batch.timeout | quote }}{{ else }}"2s"{{ end }}
 
           output {
-            {{- if .Values.gateway }}{{- if .Values.gateway.enabled }}
+            {{- if and .Values.gateway .Values.gateway.enabled }}
             {{- if and .Values.gateway.protocol (eq .Values.gateway.protocol "grpc") }}
             metrics = [otelcol.exporter.otlp.metrics_gateway.input]
             {{- else }}
             metrics = [otelcol.exporter.otlphttp.metrics_gateway.input]
             {{- end }}
             {{- else }}
-            {{- if $defaultTopicsEnabled }}
-            metrics = [otelcol.connector.failover.metrics.input]
-            {{- else }}
-            metrics = [otelcol.exporter.kafka.metrics_to_kafka.input]
-            {{- end }}
-            {{- end }}{{- else }}
-            {{- if $defaultTopicsEnabled }}
-            metrics = [otelcol.connector.failover.metrics.input]
-            {{- else }}
-            metrics = [otelcol.exporter.kafka.metrics_to_kafka.input]
-            {{- end }}
+            metrics = [otelcol.exporter.kafka_router.kafka.input]
             {{- end }}
           }
         }
-        {{- if .Values.gateway }}{{- if .Values.gateway.enabled }}
+        {{- if and .Values.gateway .Values.gateway.enabled }}
 
         {{- if and .Values.gateway.protocol (eq .Values.gateway.protocol "grpc") }}
         // Export metrics to Gateway via OTLP gRPC (more efficient than HTTP, with Basic Auth)
@@ -323,191 +363,12 @@ spec:
           {{- end }}
         }
         {{- end }}
-        {{- else }}
-
-        // Export metrics to Kafka
-        otelcol.exporter.kafka "metrics_to_kafka" {
-          protocol_version = "2.1.0"
-          brokers = [{{ if .Values.redpanda }}{{ .Values.redpanda.bootstrapServer | quote }}{{ else }}"seed-47aa9fc7.d61ib847ecku8d3si4c0.byoc.prd.cloud.redpanda.com:9092"{{ end }}]
-          authentication {
-            sasl {
-              mechanism = {{ if .Values.redpanda }}{{ .Values.redpanda.saslMechanism | quote }}{{ else }}"SCRAM-SHA-256"{{ end }}
-              username = {{ include "redpanda-o11y.kafkaUsername" . | quote }}
-              password = {{ include "redpanda-o11y.kafkaPassword" . | quote }}
-            }
-            tls {
-              insecure = false
-            }
-          }
-          producer {
-            max_message_bytes = {{ if .Values.producer }}{{ .Values.producer.metricsMaxMessageBytes }}{{ else }}10485760{{ end }}
-            compression = {{ if .Values.producer }}{{ .Values.producer.metricsCompression | quote }}{{ else }}"zstd"{{ end }}
-          }
-          metrics {
-            {{- if .Values.topics }}{{- if .Values.topics.metrics }}
-            topic = {{ .Values.topics.metrics | quote }}
-            {{- else }}
-            topic = {{ required "customer name is required" .Values.customer | quote }} + "-metrics-" + json_decode(remote.http.cluster_uuid.content)["cluster_uuid"]
-            {{- end }}{{- else }}
-            topic = {{ required "customer name is required" .Values.customer | quote }} + "-metrics-" + json_decode(remote.http.cluster_uuid.content)["cluster_uuid"]
-            {{- end }}
-          }
-
-          {{- if $defaultTopicsEnabled }}
-          metadata {
-            refresh_interval = "60s"
-            retry {
-              max_retries = 0
-              backoff     = "500ms"
-            }
-          }
-          sending_queue {
-            enabled = false
-          }
-          retry_on_failure {
-            enabled = false
-          }
-          {{- end }}
-          timeout = {{ if .Values.exportTimeout }}{{ .Values.exportTimeout | quote }}{{ else }}"30s"{{ end }}
-        }
-        {{- if $defaultTopicsEnabled }}
-
-        // Export metrics to Kafka (fallback: customer default topic)
-        otelcol.exporter.kafka "metrics_default" {
-          protocol_version = "2.1.0"
-          brokers = [{{ if .Values.redpanda }}{{ .Values.redpanda.bootstrapServer | quote }}{{ else }}"seed-47aa9fc7.d61ib847ecku8d3si4c0.byoc.prd.cloud.redpanda.com:9092"{{ end }}]
-          authentication {
-            sasl {
-              mechanism = {{ if .Values.redpanda }}{{ .Values.redpanda.saslMechanism | quote }}{{ else }}"SCRAM-SHA-256"{{ end }}
-              username = {{ include "redpanda-o11y.kafkaUsername" . | quote }}
-              password = {{ include "redpanda-o11y.kafkaPassword" . | quote }}
-            }
-            tls {
-              insecure = false
-            }
-          }
-          producer {
-            max_message_bytes = {{ if .Values.producer }}{{ .Values.producer.metricsMaxMessageBytes }}{{ else }}10485760{{ end }}
-            compression = {{ if .Values.producer }}{{ .Values.producer.metricsCompression | quote }}{{ else }}"zstd"{{ end }}
-          }
-          metrics {
-            topic = {{ required "customer name is required" .Values.customer | quote }} + "-metrics-default"
-            encoding = "otlp_proto"
-          }
-          sending_queue {
-            enabled = false
-          }
-          timeout = {{ if .Values.exportTimeout }}{{ .Values.exportTimeout | quote }}{{ else }}"30s"{{ end }}
-        }
-
-        // Failover connector for metrics: tries cluster-specific topic first,
-        // falls back to the customer default topic if the cluster topic does not exist.
-        otelcol.connector.failover "metrics" {
-          failure_threshold = 3
-          retry_interval    = "60s"
-          primary  = otelcol.exporter.kafka.metrics_to_kafka.input
-          fallback = otelcol.exporter.kafka.metrics_default.input
-        }
-        {{- end }}
-        {{- end }}{{- else }}
-
-        // Export metrics to Kafka
-        otelcol.exporter.kafka "metrics_to_kafka" {
-          protocol_version = "2.1.0"
-          brokers = [{{ if .Values.redpanda }}{{ .Values.redpanda.bootstrapServer | quote }}{{ else }}"seed-47aa9fc7.d61ib847ecku8d3si4c0.byoc.prd.cloud.redpanda.com:9092"{{ end }}]
-          authentication {
-            sasl {
-              mechanism = {{ if .Values.redpanda }}{{ .Values.redpanda.saslMechanism | quote }}{{ else }}"SCRAM-SHA-256"{{ end }}
-              username = {{ include "redpanda-o11y.kafkaUsername" . | quote }}
-              password = {{ include "redpanda-o11y.kafkaPassword" . | quote }}
-            }
-            tls {
-              insecure = false
-            }
-          }
-          producer {
-            max_message_bytes = {{ if .Values.producer }}{{ .Values.producer.metricsMaxMessageBytes }}{{ else }}10485760{{ end }}
-            compression = {{ if .Values.producer }}{{ .Values.producer.metricsCompression | quote }}{{ else }}"zstd"{{ end }}
-          }
-          metrics {
-            {{- if .Values.topics }}{{- if .Values.topics.metrics }}
-            topic = {{ .Values.topics.metrics | quote }}
-            {{- else }}
-            topic = {{ required "customer name is required" .Values.customer | quote }} + "-metrics-" + json_decode(remote.http.cluster_uuid.content)["cluster_uuid"]
-            {{- end }}{{- else }}
-            topic = {{ required "customer name is required" .Values.customer | quote }} + "-metrics-" + json_decode(remote.http.cluster_uuid.content)["cluster_uuid"]
-            {{- end }}
-          }
-
-          {{- if $defaultTopicsEnabled }}
-          metadata {
-            refresh_interval = "60s"
-            retry {
-              max_retries = 0
-              backoff     = "500ms"
-            }
-          }
-          sending_queue {
-            enabled = false
-          }
-          retry_on_failure {
-            enabled = false
-          }
-          {{- end }}
-          timeout = {{ if .Values.exportTimeout }}{{ .Values.exportTimeout | quote }}{{ else }}"30s"{{ end }}
-        }
-        {{- if $defaultTopicsEnabled }}
-
-        // Export metrics to Kafka (fallback: customer default topic)
-        otelcol.exporter.kafka "metrics_default" {
-          protocol_version = "2.1.0"
-          brokers = [{{ if .Values.redpanda }}{{ .Values.redpanda.bootstrapServer | quote }}{{ else }}"seed-47aa9fc7.d61ib847ecku8d3si4c0.byoc.prd.cloud.redpanda.com:9092"{{ end }}]
-          authentication {
-            sasl {
-              mechanism = {{ if .Values.redpanda }}{{ .Values.redpanda.saslMechanism | quote }}{{ else }}"SCRAM-SHA-256"{{ end }}
-              username = {{ include "redpanda-o11y.kafkaUsername" . | quote }}
-              password = {{ include "redpanda-o11y.kafkaPassword" . | quote }}
-            }
-            tls {
-              insecure = false
-            }
-          }
-          producer {
-            max_message_bytes = {{ if .Values.producer }}{{ .Values.producer.metricsMaxMessageBytes }}{{ else }}10485760{{ end }}
-            compression = {{ if .Values.producer }}{{ .Values.producer.metricsCompression | quote }}{{ else }}"zstd"{{ end }}
-          }
-          metrics {
-            topic = {{ required "customer name is required" .Values.customer | quote }} + "-metrics-default"
-            encoding = "otlp_proto"
-          }
-          sending_queue {
-            enabled = false
-          }
-          timeout = {{ if .Values.exportTimeout }}{{ .Values.exportTimeout | quote }}{{ else }}"30s"{{ end }}
-        }
-
-        // Failover connector for metrics: tries cluster-specific topic first,
-        // falls back to the customer default topic if the cluster topic does not exist.
-        otelcol.connector.failover "metrics" {
-          failure_threshold = 3
-          retry_interval    = "60s"
-          primary  = otelcol.exporter.kafka.metrics_to_kafka.input
-          fallback = otelcol.exporter.kafka.metrics_default.input
-        }
-        {{- end }}
         {{- end }}
 
         // discovery.relabel rewrites the label set of the input targets by applying one or more relabeling rules.
         // If no rules are defined, then the input targets are exported as-is.
         discovery.relabel "pod_logs" {
-          targets = discovery.kubernetes.pods.targets
-
-          // Keep only the pod matching this instance's ordinal
-          rule {
-            source_labels = ["__meta_kubernetes_pod_name"]
-            action        = "keep"
-            regex         = ".+-" + env("POD_INDEX")
-          }
+          targets = discovery.redpanda.pods.targets
 
           // Label creation - "namespace" field from "__meta_kubernetes_namespace"
           rule {
@@ -565,6 +426,13 @@ spec:
             regex = "^(\\S+):\\/\\/.+$"
             replacement = "$1"
           }
+
+          // Shard log targets by pod ordinal (mirrors kubernetes_pods filter).
+          rule {
+            source_labels = ["__tmp_pod_ordinal"]
+            regex         = env("POD_INDEX")
+            action        = "keep"
+          }
         }
 
         loki.source.kubernetes "pod_logs" {
@@ -590,13 +458,6 @@ spec:
             regex  = "container_runtime"
           }
 
-          // Only keep logs from the main redpanda container, not sidecars
-          rule {
-            source_labels = ["container"]
-            regex         = "^{{ .Values.discovery.containerName | default "redpanda" }}$"
-            action        = "keep"
-          }
-
           forward_to = [otelcol.receiver.loki.default.receiver]
         }
 
@@ -606,14 +467,25 @@ spec:
           }
         }
 
-        // Add cluster_id as a resource attribute for logs using dynamic UUID
+        // cluster_id arrives as a log record attribute (Loki labels map to
+        // record attrs via otelcol.receiver.loki).  Promote it to a resource
+        // attribute so kafka_router can use it for topic routing.
         otelcol.processor.transform "add_cluster_id_logs" {
           error_mode = "ignore"
 
           log_statements {
-            context = "resource"
+            context = "log"
             statements = [
-              `set(attributes["cluster_id"], "` + json_decode(remote.http.cluster_uuid.content)["cluster_uuid"] + `")`,
+              `set(resource.attributes["cluster_id"], log.attributes["cluster_id"])`,
+              {{- if $parseSeverity }}
+              `set(log.severity_text, ExtractPatterns(log.body, "^(?P<sev>TRACE|DEBUG|INFO|WARN|ERROR|FATAL)\\s")["sev"]) where IsMatch(log.body, "^(TRACE|DEBUG|INFO|WARN|ERROR|FATAL)\\s")`,
+              `set(log.severity_number, SEVERITY_NUMBER_TRACE) where log.severity_text == "TRACE"`,
+              `set(log.severity_number, SEVERITY_NUMBER_DEBUG) where log.severity_text == "DEBUG"`,
+              `set(log.severity_number, SEVERITY_NUMBER_INFO) where log.severity_text == "INFO"`,
+              `set(log.severity_number, SEVERITY_NUMBER_WARN) where log.severity_text == "WARN"`,
+              `set(log.severity_number, SEVERITY_NUMBER_ERROR) where log.severity_text == "ERROR"`,
+              `set(log.severity_number, SEVERITY_NUMBER_FATAL) where log.severity_text == "FATAL"`,
+              {{- end }}
             ]
           }
 
@@ -627,28 +499,18 @@ spec:
           send_batch_size = {{ if .Values.batch }}{{ .Values.batch.logsBatchSize }}{{ else }}10000{{ end }}
           send_batch_max_size = {{ if .Values.batch }}{{ .Values.batch.logsBatchSize }}{{ else }}10000{{ end }}
           output {
-            {{- if .Values.gateway }}{{- if .Values.gateway.enabled }}
+            {{- if and .Values.gateway .Values.gateway.enabled }}
             {{- if and .Values.gateway.protocol (eq .Values.gateway.protocol "grpc") }}
             logs = [otelcol.exporter.otlp.logs_gateway.input]
             {{- else }}
             logs = [otelcol.exporter.otlphttp.logs_gateway.input]
             {{- end }}
             {{- else }}
-            {{- if $defaultTopicsEnabled }}
-            logs = [otelcol.connector.failover.logs.input]
-            {{- else }}
-            logs = [otelcol.exporter.kafka.logs.input]
-            {{- end }}
-            {{- end }}{{- else }}
-            {{- if $defaultTopicsEnabled }}
-            logs = [otelcol.connector.failover.logs.input]
-            {{- else }}
-            logs = [otelcol.exporter.kafka.logs.input]
-            {{- end }}
+            logs = [otelcol.exporter.kafka_router.kafka.input]
             {{- end }}
           }
         }
-        {{- if .Values.gateway }}{{- if .Values.gateway.enabled }}
+        {{- if and .Values.gateway .Values.gateway.enabled }}
 
         {{- if and .Values.gateway.protocol (eq .Values.gateway.protocol "grpc") }}
         // Export logs to Gateway via OTLP gRPC (more efficient than HTTP, with Basic Auth)
@@ -697,173 +559,34 @@ spec:
         {{- end }}
         {{- else }}
 
-        otelcol.exporter.kafka "logs" {
-          protocol_version = "2.1.0"
-          brokers = [{{ if .Values.redpanda }}{{ .Values.redpanda.bootstrapServer | quote }}{{ else }}"seed-47aa9fc7.d61ib847ecku8d3si4c0.byoc.prd.cloud.redpanda.com:9092"{{ end }}]
-          authentication {
-            sasl {
-              mechanism = {{ if .Values.redpanda }}{{ .Values.redpanda.saslMechanism | quote }}{{ else }}"SCRAM-SHA-256"{{ end }}
-              username = {{ include "redpanda-o11y.kafkaUsername" . | quote }}
-              password = {{ include "redpanda-o11y.kafkaPassword" . | quote }}
-            }
-            tls {
-              insecure = false
-            }
-          }
-          producer {
-            max_message_bytes = {{ if .Values.producer }}{{ .Values.producer.logsMaxMessageBytes }}{{ else }}10485760{{ end }}
-            compression = {{ if .Values.producer }}{{ .Values.producer.logsCompression | quote }}{{ else }}"zstd"{{ end }}
-          }
-          logs {
-            {{- if .Values.topics }}{{- if .Values.topics.logs }}
-            topic = {{ .Values.topics.logs | quote }}
-            {{- else }}
-            topic = {{ required "customer name is required" .Values.customer | quote }} + "-logs-" + json_decode(remote.http.cluster_uuid.content)["cluster_uuid"]
-            {{- end }}{{- else }}
-            topic = {{ required "customer name is required" .Values.customer | quote }} + "-logs-" + json_decode(remote.http.cluster_uuid.content)["cluster_uuid"]
-            {{- end }}
+        // Route telemetry to per-cluster Kafka topics.  The cluster_id resource
+        // attribute (promoted from the cluster_uuid discovery label) selects the
+        // cluster-specific topic; if that topic does not yet exist the produce
+        // is retried on the customer default topic.  Data with no cluster_id is
+        // dropped.
+        otelcol.exporter.kafka_router "kafka" {
+          brokers         = [{{ if .Values.redpanda }}{{ .Values.redpanda.bootstrapServer | quote }}{{ else }}"seed-47aa9fc7.d61ib847ecku8d3si4c0.byoc.prd.cloud.redpanda.com:9092"{{ end }}]
+          max_batch_bytes = {{ if .Values.producer }}{{ .Values.producer.maxBatchBytes | default 10485760 }}{{ else }}10485760{{ end }}
+
+          vars = {
+            "customer" = {{ required "customer name is required" .Values.customer | quote }},
           }
 
-          {{- if $defaultTopicsEnabled }}
-          metadata {
-            refresh_interval = "60s"
-            retry {
-              max_retries = 0
-              backoff     = "500ms"
-            }
+          route {
+            topic          = "${customer}-${signal}-${cluster_id}"
+            fallback_topic = "${customer}-${signal}-default"
+            required_attrs = ["cluster_id"]
           }
-          sending_queue {
-            enabled = false
+
+          sasl {
+            mechanism = {{ if .Values.redpanda }}{{ .Values.redpanda.saslMechanism | quote }}{{ else }}"SCRAM-SHA-256"{{ end }}
+            username  = env("KAFKA_USERNAME")
+            password  = env("KAFKA_PASSWORD")
           }
-          retry_on_failure {
-            enabled = false
+
+          tls {
+            insecure = false
           }
-          {{- end }}
-          timeout = {{ if .Values.exportTimeout }}{{ .Values.exportTimeout | quote }}{{ else }}"30s"{{ end }}
         }
-        {{- if $defaultTopicsEnabled }}
-
-        // Export logs to Kafka (fallback: customer default topic)
-        otelcol.exporter.kafka "logs_default" {
-          protocol_version = "2.1.0"
-          brokers = [{{ if .Values.redpanda }}{{ .Values.redpanda.bootstrapServer | quote }}{{ else }}"seed-47aa9fc7.d61ib847ecku8d3si4c0.byoc.prd.cloud.redpanda.com:9092"{{ end }}]
-          authentication {
-            sasl {
-              mechanism = {{ if .Values.redpanda }}{{ .Values.redpanda.saslMechanism | quote }}{{ else }}"SCRAM-SHA-256"{{ end }}
-              username = {{ include "redpanda-o11y.kafkaUsername" . | quote }}
-              password = {{ include "redpanda-o11y.kafkaPassword" . | quote }}
-            }
-            tls {
-              insecure = false
-            }
-          }
-          producer {
-            max_message_bytes = {{ if .Values.producer }}{{ .Values.producer.logsMaxMessageBytes }}{{ else }}10485760{{ end }}
-            compression = {{ if .Values.producer }}{{ .Values.producer.logsCompression | quote }}{{ else }}"zstd"{{ end }}
-          }
-          logs {
-            topic = {{ required "customer name is required" .Values.customer | quote }} + "-logs-default"
-            encoding = "otlp_proto"
-          }
-          sending_queue {
-            enabled = false
-          }
-          timeout = {{ if .Values.exportTimeout }}{{ .Values.exportTimeout | quote }}{{ else }}"30s"{{ end }}
-        }
-
-        // Failover connector for logs: tries cluster-specific topic first,
-        // falls back to the customer default topic if the cluster topic does not exist.
-        otelcol.connector.failover "logs" {
-          failure_threshold = 3
-          retry_interval    = "60s"
-          primary  = otelcol.exporter.kafka.logs.input
-          fallback = otelcol.exporter.kafka.logs_default.input
-        }
-        {{- end }}
-        {{- end }}{{- else }}
-
-        otelcol.exporter.kafka "logs" {
-          protocol_version = "2.1.0"
-          brokers = [{{ if .Values.redpanda }}{{ .Values.redpanda.bootstrapServer | quote }}{{ else }}"seed-47aa9fc7.d61ib847ecku8d3si4c0.byoc.prd.cloud.redpanda.com:9092"{{ end }}]
-          authentication {
-            sasl {
-              mechanism = {{ if .Values.redpanda }}{{ .Values.redpanda.saslMechanism | quote }}{{ else }}"SCRAM-SHA-256"{{ end }}
-              username = {{ include "redpanda-o11y.kafkaUsername" . | quote }}
-              password = {{ include "redpanda-o11y.kafkaPassword" . | quote }}
-            }
-            tls {
-              insecure = false
-            }
-          }
-          producer {
-            max_message_bytes = {{ if .Values.producer }}{{ .Values.producer.logsMaxMessageBytes }}{{ else }}10485760{{ end }}
-            compression = {{ if .Values.producer }}{{ .Values.producer.logsCompression | quote }}{{ else }}"zstd"{{ end }}
-          }
-          logs {
-            {{- if .Values.topics }}{{- if .Values.topics.logs }}
-            topic = {{ .Values.topics.logs | quote }}
-            {{- else }}
-            topic = {{ required "customer name is required" .Values.customer | quote }} + "-logs-" + json_decode(remote.http.cluster_uuid.content)["cluster_uuid"]
-            {{- end }}{{- else }}
-            topic = {{ required "customer name is required" .Values.customer | quote }} + "-logs-" + json_decode(remote.http.cluster_uuid.content)["cluster_uuid"]
-            {{- end }}
-          }
-
-          {{- if $defaultTopicsEnabled }}
-          metadata {
-            refresh_interval = "60s"
-            retry {
-              max_retries = 0
-              backoff     = "500ms"
-            }
-          }
-          sending_queue {
-            enabled = false
-          }
-          retry_on_failure {
-            enabled = false
-          }
-          {{- end }}
-          timeout = {{ if .Values.exportTimeout }}{{ .Values.exportTimeout | quote }}{{ else }}"30s"{{ end }}
-        }
-        {{- if $defaultTopicsEnabled }}
-
-        // Export logs to Kafka (fallback: customer default topic)
-        otelcol.exporter.kafka "logs_default" {
-          protocol_version = "2.1.0"
-          brokers = [{{ if .Values.redpanda }}{{ .Values.redpanda.bootstrapServer | quote }}{{ else }}"seed-47aa9fc7.d61ib847ecku8d3si4c0.byoc.prd.cloud.redpanda.com:9092"{{ end }}]
-          authentication {
-            sasl {
-              mechanism = {{ if .Values.redpanda }}{{ .Values.redpanda.saslMechanism | quote }}{{ else }}"SCRAM-SHA-256"{{ end }}
-              username = {{ include "redpanda-o11y.kafkaUsername" . | quote }}
-              password = {{ include "redpanda-o11y.kafkaPassword" . | quote }}
-            }
-            tls {
-              insecure = false
-            }
-          }
-          producer {
-            max_message_bytes = {{ if .Values.producer }}{{ .Values.producer.logsMaxMessageBytes }}{{ else }}10485760{{ end }}
-            compression = {{ if .Values.producer }}{{ .Values.producer.logsCompression | quote }}{{ else }}"zstd"{{ end }}
-          }
-          logs {
-            topic = {{ required "customer name is required" .Values.customer | quote }} + "-logs-default"
-            encoding = "otlp_proto"
-          }
-          sending_queue {
-            enabled = false
-          }
-          timeout = {{ if .Values.exportTimeout }}{{ .Values.exportTimeout | quote }}{{ else }}"30s"{{ end }}
-        }
-
-        // Failover connector for logs: tries cluster-specific topic first,
-        // falls back to the customer default topic if the cluster topic does not exist.
-        otelcol.connector.failover "logs" {
-          failure_threshold = 3
-          retry_interval    = "60s"
-          primary  = otelcol.exporter.kafka.logs.input
-          fallback = otelcol.exporter.kafka.logs_default.input
-        }
-        {{- end }}
         {{- end }}
 {{- end }}

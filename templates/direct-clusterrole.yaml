@@ -9,69 +9,16 @@ metadata:
     app.kubernetes.io/instance: {{ .Values.alloy.name }}
     app.kubernetes.io/component: rbac
 rules:
-  # Discovery and scraping
-  - apiGroups: ["", "discovery.k8s.io", "networking.k8s.io"]
-    resources:
-      - endpoints
-      - endpointslices
-      - ingresses
-      - pods
-      - services
-    verbs: ["get", "list", "watch"]
-
-  # Pod logs collection
+  # Pod discovery (prometheus.scrape + loki.source.kubernetes)
   - apiGroups: [""]
     resources:
       - pods
-      - pods/log
       - namespaces
     verbs: ["get", "list", "watch"]
 
-  # Grafana Agent specific resources
-  - apiGroups: ["monitoring.grafana.com"]
-    resources:
-      - podlogs
-    verbs: ["get", "list", "watch"]
-
-  # Prometheus Operator resources
-  - apiGroups: ["monitoring.coreos.com"]
-    resources:
-      - prometheusrules
-      - alertmanagerconfigs
-      - podmonitors
-      - servicemonitors
-      - probes
-      - scrapeconfigs
-    verbs: ["get", "list", "watch"]
-
-  # Events
+  # Pod log collection (loki.source.kubernetes)
   - apiGroups: [""]
     resources:
-      - events
-    verbs: ["get", "list", "watch"]
-
-  # ConfigMaps and Secrets
-  - apiGroups: [""]
-    resources:
-      - configmaps
-      - secrets
-    verbs: ["get", "list", "watch"]
-
-  # ReplicaSets
-  - apiGroups: ["apps", "extensions"]
-    resources:
-      - replicasets
-    verbs: ["get", "list", "watch"]
-
-  # Nodes
-  - apiGroups: [""]
-    resources:
-      - nodes
-      - nodes/pods
-      - nodes/metrics
-    verbs: ["get", "list", "watch"]
-
-  # Non-resource URLs
-  - nonResourceURLs: ["/metrics"]
+      - pods/log
     verbs: ["get"]
 {{- end }}

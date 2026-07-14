@@ -19,22 +19,33 @@ alloy:
 
   # Deployment mode: "alloy" or "direct"
   # - alloy: Creates Alloy custom resource, requires Alloy operator (default)
-  # - direct: Creates Kubernetes resources directly (Deployment, ConfigMap, RBAC) without operator
+  # - direct: Creates Kubernetes resources directly (StatefulSet, ConfigMap, RBAC) without operator
   deploymentMode: "alloy"
 
-  # Controller type for the Alloy instance: "Deployment", "DaemonSet", or "StatefulSet"
-  # - StatefulSet: recommended — each pod gets a stable ordinal that maps 1-1 to a Redpanda broker
-  # - Deployment: single replicated collector, suitable when only one broker needs scraping
-  # - DaemonSet: one collector per node, only needed for host-level telemetry collection
-  controllerType: "StatefulSet"
+  # The collector always runs as a StatefulSet — each pod gets a stable ordinal and scrapes the
+  # Redpanda brokers whose global discovery ordinal (mod replicas) matches it. Set replicas to the
+  # total broker count across all discovery.namespaces for a 1-1 split; fewer replicas shard
+  # multiple brokers per pod.
 
-  # Number of replicas (only applies to Deployment and StatefulSet controller types)
-  # Defaults to the replica count of the discovered Redpanda StatefulSet, falling back to 1
-  # replicas: 1
+  # Number of replicas
+  # Set to match the total number of Redpanda brokers being monitored. Default: 3
+  # replicas: 3
+
+  # Alloy log level. Options: error, warn, info, debug. Default: info
+  # logLevel: "info"
+
+  # Enable live debugging in the Alloy UI. Allows inspecting data flowing through
+  # components in real time. Not recommended for production. Default: false
+  # liveDebugging: false
+
+  # Maximum pods that can be unavailable during a rolling update (StatefulSet only).
+  # Defaults to replicas — all pods restart in parallel.
+  # Set lower (e.g. 1) to get canary-style rollout protection at the cost of longer rollouts.
+  # maxUnavailable: 3
 
   # Override the Alloy container image (optional)
-  # Defaults to paulmw/alloy:v1.13.2-kafkarouter
-  # image: "paulmw/alloy:v1.13.2-kafkarouter"
+  # Defaults to paulmw/alloy:v1.17.1-rp
+  # image: "paulmw/alloy:v1.17.1-rp"
 
 # ------------------------------------------------------------------------------
 # Customer Configuration (REQUIRED)
@@ -128,26 +139,15 @@ redpanda:
 # Configuration for discovering Redpanda pods, scraping metrics, and fetching
 # the cluster UUID from the Redpanda Admin API.
 discovery:
-  # Namespace where Redpanda pods are running
-  # Defaults to the same namespace where the collector is deployed
-  namespace: "redpanda"
+  # Namespaces to discover Redpanda pods in. Accepts a list — add entries to
+  # monitor multiple clusters. Defaults to the namespace the collector is deployed in.
+  namespaces:
+    - "redpanda"
 
   # Pod label selector for discovering Redpanda pods
   # Adjust if your Redpanda deployment uses different labels
   labelSelector: "app.kubernetes.io/name=redpanda"
 
-  # Name of the Redpanda container within the pod. Used to filter logs to only the
-  # main Redpanda container and exclude any sidecars. Defaults to "redpanda" which
-  # is correct for the standard Redpanda Helm chart. Override if your chart names
-  # the container differently (e.g. after the Helm release name).
-  # containerName: "redpanda"
-
-  # Override the app name used to build the admin API URL and pod regex for scraping.
-  # By default this is derived from the label selector value (e.g. "redpanda" from
-  # "app.kubernetes.io/name=redpanda"). Set this when the StatefulSet and headless
-  # service have a different name — for example if the Helm release was named
-  # "redpanda-sandbox", set appName: "redpanda-sandbox".
-  # appName: ""
 
   # Admin API port for metrics collection and cluster UUID discovery
   adminPort: 9644
@@ -183,19 +183,23 @@ discovery:
 # Producer Configuration (OPTIONAL)
 # ------------------------------------------------------------------------------
 # Kafka producer settings for direct mode
-# producer:
-  # Compression algorithm for metrics
+producer:
+  # Maximum Kafka RecordBatch size in bytes. Must not exceed the broker's
+  # kafka_batch_max_bytes. Default matches the BYOC cluster's 10 MiB limit.
+  maxBatchBytes: 10485760  # 10 MiB
+
+  # Compression algorithm (optional — defaults to zstd)
   # Options: "none", "gzip", "snappy", "lz4", "zstd"
-  # metricsCompression: "zstd"
+  # compression: "zstd"
 
-  # Maximum message size for metrics (bytes)
-  # metricsMaxMessageBytes: 10485760  # 10MiB
-
-  # Compression algorithm for logs
-  # logsCompression: "zstd"
-
-  # Maximum message size for logs (bytes)
-  # logsMaxMessageBytes: 10485760  # 10MiB
+# ------------------------------------------------------------------------------
+# Log Processing Configuration (OPTIONAL)
+# ------------------------------------------------------------------------------
+logs:
+  # Parse severity level (INFO, WARN, ERROR, etc.) from the log body.
+  # Disable for very high-volume clusters where the per-record OTTL overhead
+  # is measurable. Default: true.
+  parseSeverity: true
 
 # ------------------------------------------------------------------------------
 # Export Configuration (OPTIONAL)
