@@ -45,7 +45,7 @@ Next Steps:
 
 {{- if eq (.Values.alloy.deploymentMode | default "alloy") "direct" }}
 1. Check the Alloy collector status:
-   kubectl get {{ .Values.alloy.controllerType | default "Deployment" }} {{ include "redpanda-o11y.alloyResourceName" . }}-alloy -n {{ .Values.alloy.namespace }}
+   kubectl get StatefulSet {{ include "redpanda-o11y.alloyResourceName" . }}-alloy -n {{ .Values.alloy.namespace }}
 {{- else }}
 1. Check the Alloy collector status:
    kubectl get alloy {{ include "redpanda-o11y.alloyResourceName" . }} -n {{ .Values.alloy.namespace }}
