@@ -3,6 +3,8 @@
 {{- $namespaces := .Values.discovery.namespaces | default (list .Release.Namespace) }}
 {{- $adminPort := .Values.discovery.adminPort | default 9644 }}
 {{- $parseSeverity := ne ((.Values.logs).parseSeverity | toString) "false" }}
+{{- $clustering := .Values.alloy.clustering | default false }}
+{{- $replicas := .Values.alloy.replicas | default 3 }}
 apiVersion: collectors.grafana.com/v1alpha1
 kind: Alloy
 metadata:
@@ -18,18 +20,24 @@ spec:
     tag: {{ last $imageParts }}
   controller:
     type: statefulset
-    replicas: {{ .Values.alloy.replicas | default 3 }}
+    replicas: {{ $replicas }}
+{{- if $clustering }}
   clustering:
     enabled: true
     name: {{ include "redpanda-o11y.alloyResourceName" . }}
     portName: http-metrics
+{{- end }}
   alloy:
     stabilityLevel: experimental
     extraEnv:
+{{- if not $clustering }}
+      # Used by discovery.redpanda's default (non-clustering) scheme to
+      # shard scrape targets by __tmp_pod_ordinal % num_shards.
       - name: POD_INDEX
         valueFrom:
           fieldRef:
             fieldPath: metadata.labels['apps.kubernetes.io/pod-index']
+{{- end }}
 {{- if .Values.credentials.secretName }}
       - name: KAFKA_USERNAME
         valueFrom:
@@ -107,8 +115,12 @@ spec:
         discovery.redpanda "pods" {
           targets    = discovery.kubernetes.pods.targets
           admin_port = {{ $adminPort }}
-          num_shards = {{ .Values.alloy.replicas | default 3 }}
           tls_skip_verify = true
+          {{- if $clustering }}
+          clustering = true
+          {{- else }}
+          num_shards = {{ $replicas }}
+          {{- end }}
         }
 
         // Relabel discovered targets to only scrape annotated pods
@@ -121,6 +133,17 @@ spec:
             action        = "keep"
             regex         = {{ .Values.discovery.adminPort | default 9644 | quote }}
           }
+          {{- if not $clustering }}
+
+          // Shard targets: each collector pod scrapes only the Redpanda pod
+          // whose global ordinal (assigned by discovery.redpanda) matches
+          // this collector's own StatefulSet index.
+          rule {
+            source_labels = ["__tmp_pod_ordinal"]
+            regex         = env("POD_INDEX")
+            action        = "keep"
+          }
+          {{- end }}
 
           // Route each target's scrape at whatever scheme discovery.redpanda
           // actually detected for its admin API (see __tmp_admin_tls_enabled) —
@@ -207,16 +230,6 @@ spec:
             target_label = "endpoint"
             replacement  = "metrics"
           }
-
-          // Shard targets: each collector pod scrapes only the Redpanda pod
-          // whose global ordinal (assigned by discovery.redpanda) matches
-          // this collector's own StatefulSet index.
-          rule {
-            source_labels = ["__tmp_pod_ordinal"]
-            regex         = env("POD_INDEX")
-            action        = "keep"
-          }
-
         }
 
         // Relabel discovered targets for /public_metrics endpoint
@@ -427,6 +440,7 @@ spec:
             regex = "^(\\S+):\\/\\/.+$"
             replacement = "$1"
           }
+          {{- if not $clustering }}
 
           // Shard log targets by pod ordinal (mirrors kubernetes_pods filter).
           rule {
@@ -434,6 +448,7 @@ spec:
             regex         = env("POD_INDEX")
             action        = "keep"
           }
+          {{- end }}
         }
 
         loki.source.kubernetes "pod_logs" {

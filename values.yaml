@@ -22,13 +22,24 @@ alloy:
   # - direct: Creates Kubernetes resources directly (StatefulSet, ConfigMap, RBAC) without operator
   deploymentMode: "alloy"
 
-  # The collector always runs as a StatefulSet — each pod gets a stable ordinal and scrapes the
-  # Redpanda brokers whose global discovery ordinal (mod replicas) matches it. Set replicas to the
-  # total broker count across all discovery.namespaces for a 1-1 split; fewer replicas shard
-  # multiple brokers per pod.
+  # The collector always runs as a StatefulSet. Which replica scrapes which Redpanda broker is
+  # decided one of two ways, selected by clustering below:
+  # - clustering: false (default): a static ordinal % replicas scheme. Set replicas to match the
+  #   real collector count exactly, or brokers will be sharded incorrectly — this scheme has no way
+  #   to detect a mismatch itself. Has no dependency on Alloy's native clustering at all.
+  # - clustering: true: discovery.redpanda's embedded Raft group decides ownership dynamically
+  #   itself — adding or removing a broker or a replica only reassigns what's actually affected.
+  #   Requires Alloy's native clustering (wired up automatically) and, in direct mode, extra RBAC
+  #   for the Raft bootstrap/recovery ConfigMap, pod annotations, and election Lease.
+  # Migrating between the two requires a coordinated, all-at-once rollout of every replica — there's
+  # no safety net that mirrors the other mode's assignment mid-rollout.
+
+  # Enable Raft-backed dynamic broker allocation instead of the default static ordinal scheme.
+  # Default: false
+  # clustering: true
 
   # Number of replicas
-  # Set to match the total number of Redpanda brokers being monitored. Default: 3
+  # Set to match the total number of Redpanda brokers being monitored (both modes). Default: 3
   # replicas: 3
 
   # Alloy log level. Options: error, warn, info, debug. Default: info

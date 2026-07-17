@@ -1,0 +1,21 @@
+{{- $deploymentMode := .Values.alloy.deploymentMode | default "alloy" }}
+{{- $clustering := .Values.alloy.clustering | default false }}
+{{- if and (eq $deploymentMode "direct") $clustering }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "redpanda-o11y.alloyResourceName" . }}-alloy
+  namespace: {{ .Values.alloy.namespace }}
+  labels:
+    app.kubernetes.io/name: alloy
+    app.kubernetes.io/instance: {{ .Values.alloy.name }}
+    app.kubernetes.io/component: rbac
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "redpanda-o11y.alloyResourceName" . }}-alloy
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "redpanda-o11y.alloyResourceName" . }}-alloy
+    namespace: {{ .Values.alloy.namespace }}
+{{- end }}

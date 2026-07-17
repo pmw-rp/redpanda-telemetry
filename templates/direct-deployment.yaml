@@ -2,6 +2,8 @@
 {{- if eq $deploymentMode "direct" }}
 {{- $namespaces := .Values.discovery.namespaces | default (list .Release.Namespace) }}
 {{- $replicas := .Values.alloy.replicas | default 3 }}
+{{- $clustering := .Values.alloy.clustering | default false }}
+{{- $clusterWaitForSize := .Values.alloy.clusterWaitForSize | default 2 }}
 apiVersion: v1
 kind: Service
 metadata:
@@ -20,6 +22,12 @@ spec:
     - name: http-metrics
       port: 12345
       targetPort: 12345
+{{- if $clustering }}
+    # discovery.redpanda's raft_bind_port default (leave port/raft_bind_port in sync if ever changed)
+    - name: raft
+      port: 9700
+      targetPort: 9700
+{{- end }}
 ---
 apiVersion: apps/v1
 kind: StatefulSet
@@ -32,6 +40,13 @@ metadata:
     app.kubernetes.io/component: alloy
 spec:
   replicas: {{ $replicas }}
+{{- if $clustering }}
+  # Per-pod DNS names (via the headless Service above) that Raft peers use
+  # to address each other and survive a restart without going stale — see
+  # discovery.redpanda's package doc comment. Not needed in the default,
+  # non-clustering scheme.
+  serviceName: {{ include "redpanda-o11y.alloyResourceName" . }}-alloy
+{{- end }}
   podManagementPolicy: Parallel
   updateStrategy:
     type: RollingUpdate
@@ -64,13 +79,26 @@ spec:
             - --server.http.ui-path-prefix=/
             - --stability.level=experimental
             - --server.http.enable-pprof=true
+{{- if $clustering }}
+            # discovery.redpanda requires Alloy's native clustering to be enabled — it uses
+            # cluster.Peers()/cluster.Ready() to decide broker-to-replica ownership and to avoid
+            # every replica scraping everything before the fleet has actually converged.
+            - --cluster.enabled=true
+            - --cluster.join-addresses=dns+{{ include "redpanda-o11y.alloyResourceName" . }}-alloy.{{ .Values.alloy.namespace }}.svc.cluster.local:12345
+            - --cluster.wait-for-size={{ $clusterWaitForSize }}
+{{- end }}
           env:
             - name: ALLOY_DEPLOY_MODE
               value: helm
+{{- if not $clustering }}
+            # Used by discovery.redpanda's default (non-clustering) scheme to
+            # shard scrape targets by __tmp_pod_ordinal % num_shards — see
+            # direct-configmap.yaml.
             - name: POD_INDEX
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.labels['apps.kubernetes.io/pod-index']
+{{- end }}
 {{- if .Values.credentials.secretName }}
             - name: KAFKA_USERNAME
               valueFrom:
@@ -120,6 +148,11 @@ spec:
             - name: http-metrics
               containerPort: 12345
               protocol: TCP
+{{- if $clustering }}
+            - name: raft
+              containerPort: 9700
+              protocol: TCP
+{{- end }}
           readinessProbe:
             httpGet:
               path: /-/ready

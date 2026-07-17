@@ -29,6 +29,8 @@ Creates Kubernetes resources directly — a StatefulSet, ConfigMap, ServiceAccou
 
 The collector always runs as a StatefulSet: every discovered Redpanda pod (across all configured `discovery.namespaces`) is assigned a stable global ordinal, and collector pod `N` scrapes only the Redpanda pods whose ordinal modulo `alloy.replicas` equals `N`. Set `alloy.replicas` to the total number of brokers being monitored across all namespaces for an even, non-overlapping 1-to-1 split; a smaller value shards multiple brokers onto each collector pod instead.
 
+Set `alloy.clustering: true` to switch to dynamic, Raft-backed allocation instead — `discovery.redpanda` then decides ownership itself and rebalances automatically as brokers or replicas come and go, at the cost of extra RBAC (a ConfigMap, pod annotations, and an election Lease) and a dependency on Alloy's native clustering. Migrating between the two modes needs a coordinated, all-at-once rollout of every replica.
+
 ```yaml
 alloy:
   deploymentMode: "direct"

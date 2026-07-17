@@ -1,0 +1,48 @@
+{{- $deploymentMode := .Values.alloy.deploymentMode | default "alloy" }}
+{{- $clustering := .Values.alloy.clustering | default false }}
+{{- if and (eq $deploymentMode "direct") $clustering }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "redpanda-o11y.alloyResourceName" . }}-alloy
+  namespace: {{ .Values.alloy.namespace }}
+  labels:
+    app.kubernetes.io/name: alloy
+    app.kubernetes.io/instance: {{ .Values.alloy.name }}
+    app.kubernetes.io/component: rbac
+rules:
+  # discovery.redpanda's Raft bootstrap decision: the well-known ConfigMap
+  # created/updated here records which epoch (incarnation) of the Raft
+  # cluster currently exists, with no local persistent storage needed at
+  # all. update is needed alongside get/create: the leader periodically
+  # heartbeats its epoch into the marker, and a replica recovering from a
+  # genuine total-fleet state loss reclaims it with a fresh epoch — see
+  # raftnode.go's decideBootstrap and redpanda.go's refreshEpochHeartbeat.
+  # No delete — the marker is never removed once created.
+  - apiGroups: [""]
+    resources:
+      - configmaps
+    verbs: ["get", "create", "update"]
+  # Each replica records, on its own pod, whether its local Raft store
+  # currently has state (list to check siblings, patch to update its own
+  # annotation) — see raftnode.go's anyPeerHasState/setHasStateAnnotation.
+  # A replica deciding whether to bootstrap checks every sibling's
+  # annotation before ever concluding the bootstrap marker above might be
+  # stale from a genuine total-fleet state loss, rather than a real cluster
+  # simply existing elsewhere.
+  - apiGroups: [""]
+    resources:
+      - pods
+    verbs: ["list", "patch"]
+  # decideBootstrap serializes the bootstrap decision itself behind this
+  # Lease (client-go's standard leader-election primitive) so at most one
+  # replica ever performs the check-then-write above at a time — a
+  # resourceVersion-conditioned Update on the ConfigMap alone only rejects
+  # a write based on stale data it already read, not a second, equally
+  # fresh read that arrives right after the first write commits, which a
+  # live full-fleet-restart test showed really does happen without this.
+  - apiGroups: ["coordination.k8s.io"]
+    resources:
+      - leases
+    verbs: ["get", "create", "update"]
+{{- end }}
