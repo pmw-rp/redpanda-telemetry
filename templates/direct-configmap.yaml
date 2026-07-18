@@ -251,8 +251,8 @@ data:
         // together so that Prometheus histogram families (_bucket/_sum/_count) are never
         // split across separate Kafka messages.
         otelcol.processor.metricsbatcher "default" {
-          send_batch_max_size = {{ if .Values.batch }}{{ .Values.batch.metricsBatchMaxSize }}{{ else }}5000{{ end }}
-          timeout             = {{ if .Values.batch }}{{ .Values.batch.timeout | quote }}{{ else }}"2s"{{ end }}
+          send_batch_max_size = {{ if and .Values.batch .Values.batch.metricsBatchMaxSize }}{{ .Values.batch.metricsBatchMaxSize }}{{ else }}5000{{ end }}
+          timeout             = {{ if and .Values.batch .Values.batch.timeout }}{{ .Values.batch.timeout | quote }}{{ else }}"2s"{{ end }}
 
           output {
             {{- if and .Values.gateway .Values.gateway.enabled }}
@@ -447,9 +447,9 @@ data:
         }
 
         otelcol.processor.batch "batcher" {
-          timeout = {{ if .Values.batch }}{{ .Values.batch.timeout | quote }}{{ else }}"10s"{{ end }}
-          send_batch_size = {{ if .Values.batch }}{{ .Values.batch.logsBatchSize }}{{ else }}10000{{ end }}
-          send_batch_max_size = {{ if .Values.batch }}{{ .Values.batch.logsBatchSize }}{{ else }}10000{{ end }}
+          timeout = {{ if and .Values.batch .Values.batch.timeout }}{{ .Values.batch.timeout | quote }}{{ else }}"10s"{{ end }}
+          send_batch_size = {{ if and .Values.batch .Values.batch.logsBatchSize }}{{ .Values.batch.logsBatchSize }}{{ else }}10000{{ end }}
+          send_batch_max_size = {{ if and .Values.batch .Values.batch.logsBatchSize }}{{ .Values.batch.logsBatchSize }}{{ else }}10000{{ end }}
           output {
             {{- if and .Values.gateway .Values.gateway.enabled }}
             {{- if and .Values.gateway.protocol (eq .Values.gateway.protocol "grpc") }}
