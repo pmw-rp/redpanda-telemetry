@@ -11,14 +11,23 @@ metadata:
     app.kubernetes.io/instance: {{ .Values.alloy.name }}
     app.kubernetes.io/component: rbac
 rules:
-  # discovery.redpanda's Raft bootstrap decision: the well-known ConfigMap
-  # created/updated here records which epoch (incarnation) of the Raft
-  # cluster currently exists, with no local persistent storage needed at
-  # all. update is needed alongside get/create: the leader periodically
-  # heartbeats its epoch into the marker, and a replica recovering from a
-  # genuine total-fleet state loss reclaims it with a fresh epoch — see
-  # raftnode.go's decideBootstrap and redpanda.go's refreshEpochHeartbeat.
-  # No delete — the marker is never removed once created.
+  # Two well-known ConfigMaps, unscoped by name since both are only ever
+  # touched by this component's own replicas:
+  # - discovery.redpanda's Raft bootstrap decision: records which epoch
+  #   (incarnation) of the Raft cluster currently exists, with no local
+  #   persistent storage needed at all. update is needed alongside
+  #   get/create: the leader periodically heartbeats its epoch into the
+  #   marker, and a replica recovering from a genuine total-fleet state
+  #   loss reclaims it with a fresh epoch — see raftnode.go's
+  #   decideBootstrap and redpanda.go's refreshEpochHeartbeat.
+  # - Admission control's per-replica admitted-broker-set memory (one key
+  #   per pod name in a single shared ConfigMap) — see
+  #   admissionStateConfigMapSuffix. Deliberately a ConfigMap, not a pod
+  #   annotation: confirmed live, a pod annotation doesn't survive a full
+  #   StatefulSet pod recreation, only a container restart within the
+  #   same still-existing pod, and it's exactly a full recreation this
+  #   needs to survive.
+  # No delete on either — neither is ever removed once created.
   - apiGroups: [""]
     resources:
       - configmaps
