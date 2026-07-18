@@ -5,6 +5,7 @@
 {{- $parseSeverity := ne ((.Values.logs).parseSeverity | toString) "false" }}
 {{- $clustering := .Values.alloy.clustering | default false }}
 {{- $replicas := .Values.alloy.replicas | default 3 }}
+{{- $admissionControl := and $clustering (.Values.alloy.admissionControl | default false) }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -54,6 +55,12 @@ data:
           tls_skip_verify = true
           {{- if $clustering }}
           clustering = true
+          {{- if $admissionControl }}
+          admission_control {
+            enabled                     = true
+            flush_metrics_component_id = "otelcol.processor.metricsbatcher.default"
+          }
+          {{- end }}
           {{- else }}
           num_shards = {{ $replicas }}
           {{- end }}

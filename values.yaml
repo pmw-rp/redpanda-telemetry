@@ -38,6 +38,13 @@ alloy:
   # Default: false
   # clustering: true
 
+  # Only meaningful when clustering is true. Gates how many of each replica's Raft-assigned
+  # brokers are actually scraped, based on that replica's own flush-queue health
+  # (otelcol.processor.metricsbatcher's flushes_in_flight/flushes_capacity) rather than admitting
+  # everything the instant Raft assigns it. Publishes a discovery_redpanda_admission_gap gauge an
+  # external HPA/KEDA can scale alloy.replicas on. Default: false
+  # admissionControl: true
+
   # Number of replicas
   # Set to match the total number of Redpanda brokers being monitored (both modes). Default: 3
   # replicas: 3
