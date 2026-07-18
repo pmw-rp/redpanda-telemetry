@@ -16,8 +16,9 @@ This chart requires a custom-built Alloy image (`paulmw/alloy:v1.17.1-rp` by def
 `alloy.image` in `values.yaml`), built from a private fork of `grafana/alloy` that adds three
 components this chart depends on directly:
 
-- `discovery.redpanda` — enriches discovered pod targets with per-pod Redpanda cluster UUIDs and
-  decides, via an embedded Raft group, which collector replica scrapes which broker.
+- `discovery.redpanda` — enriches discovered pod targets with per-pod Redpanda cluster UUIDs and, when
+  `alloy.clustering` is enabled, decides via an embedded Raft group which collector replica scrapes
+  which broker (default is a static ordinal % replica-count scheme, see below).
 - `otelcol.exporter.kafka_router` — routes OTLP metrics/logs to per-customer/per-cluster Kafka
   topics with template-based fallback.
 - `otelcol.processor.metricsbatcher` — batches metrics without splitting a histogram family
@@ -73,35 +74,47 @@ The collector always runs as a StatefulSet — `alloy.controllerType` was remove
 already non-functional for anything beyond a single replica; don't reintroduce them without also
 solving that.
 
-### Broker allocation via embedded Raft, not pod ordinal
+### Broker allocation: static ordinal (default) or embedded Raft (opt-in via `alloy.clustering`)
 
-`discovery.redpanda` decides which collector replica scrapes which Redpanda broker itself, via a
-Raft group embedded in the component (one voter per Alloy replica, membership driven by Alloy's
-own gossip clustering). The Raft leader assigns brokers to the least-loaded eligible collector,
-rebalances when a replica joins or leaves, and prefers not putting two brokers from the same
-Redpanda cluster on one collector. There's no pod-ordinal or `POD_INDEX` involvement at all
-anymore — every replica's `discovery.redpanda` output already reflects final ownership, so nothing
-downstream needs to relabel-filter by shard. Set `alloy.replicas` to roughly the total broker count
-across all monitored namespaces to get close to a 1:1 split; fewer replicas just means each
-collector owns more brokers.
+`alloy.clustering` (default `false`) selects how `discovery.redpanda` decides which collector
+replica scrapes which Redpanda broker:
 
-This requires:
+- **`false` (default)**: a static `ordinal % replicas` scheme. Every tracked pod is sorted by
+  (namespace, StatefulSet, pod ordinal) and labeled with its position mod replica count; a
+  downstream relabel rule filters by comparing that label against `env(POD_INDEX)`. No dependency
+  on Alloy's native clustering. `alloy.replicas` has to be kept in sync with the real collector
+  count, and the global sort couples every Redpanda cluster's assignment to every other cluster's
+  topology — a broker added to one cluster can reshuffle scrape ownership for brokers in a totally
+  unrelated one.
+- **`true`**: an embedded Raft group (one voter per Alloy replica, membership driven by Alloy's own
+  gossip clustering) decides ownership dynamically instead. The leader assigns brokers to the
+  least-loaded eligible collector, rebalances when a replica joins or leaves, and prefers not
+  putting two brokers from the same Redpanda cluster on one collector. Every replica's
+  `discovery.redpanda` output already reflects final ownership, so nothing downstream needs to
+  relabel-filter by shard.
+
+Switching `alloy.clustering` on a live StatefulSet changes immutable fields (`serviceName`), so
+expect to need `kubectl delete statefulset` (safe — no PVCs) before `helm upgrade` when flipping it.
+
+Raft mode (`alloy.clustering: true`) additionally requires:
 - Alloy's native clustering enabled (`--cluster.enabled`, `--cluster.join-addresses`,
-  `--cluster.wait-for-size`) — `discovery.redpanda` reads `cluster.Peers()`/`cluster.Ready()` to
-  bridge gossip membership into its own Raft voter set.
+  `--cluster.wait-for-size`, wired up automatically) — `discovery.redpanda` reads
+  `cluster.Peers()`/`cluster.Ready()` to bridge gossip membership into its own Raft voter set.
 - A dedicated Raft RPC port (`raft_bind_port`, default `9700`) on both the container and the
   headless Service, separate from Alloy's own clustering port.
 - `serviceName` set on the StatefulSet, so pods get the per-pod DNS names
   (`<pod>.<service>.<namespace>.svc.cluster.local`) Raft peers use to address each other — a plain
   pod IP goes stale across a restart, which DNS doesn't.
-- A namespaced `Role`/`RoleBinding` granting the Alloy ServiceAccount `get`/`create` on ConfigMaps
-  (`templates/direct-role.yaml`). Every collector pod's Raft state is deliberately ephemeral — no
-  PVC, nothing persisted to disk — so on every restart, a replica has to decide fresh whether it's
-  safe to bootstrap a new Raft cluster or whether a real one already exists. That decision is made
-  by atomically creating a well-known marker ConfigMap (`<statefulset>-raft-bootstrapped`):
-  Kubernetes' `Create` is atomic at the API server, so exactly one replica ever wins the race no
-  matter how many restart at once or how inconsistent their gossip views of each other are — a
-  replica that loses just waits to be added as a Raft voter by whoever already has.
+- A namespaced `Role`/`RoleBinding` (`templates/direct-role.yaml`) granting the Alloy ServiceAccount
+  RBAC for the bootstrap-marker ConfigMap, a per-pod raft-state annotation, and a bootstrap-election
+  Lease. Every collector pod's Raft state is deliberately ephemeral — no PVC, nothing persisted to
+  disk — so on every restart, a replica has to decide fresh whether it's safe to bootstrap a new
+  Raft cluster or whether a real one already exists; the Lease serializes that decision so exactly
+  one replica ever wins it, no matter how many restart at once.
+- A `preStop` hook (`lifecycle.preStop.httpGet` on the container, `terminationGracePeriodSeconds:
+  120` on the pod) that asks `discovery.redpanda`'s HTTP endpoint to gracefully remove the
+  departing replica as a Raft voter before Kubernetes sends `SIGTERM` — this is what keeps a bulk
+  scale-down from stranding the remaining replicas below quorum.
 
 ### Multi-cluster cluster_id discovery
 
