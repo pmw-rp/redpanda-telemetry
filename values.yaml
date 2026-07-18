@@ -194,6 +194,13 @@ discovery:
   # Batch timeout - max time to wait before sending partial batch
   # timeout: "2s"
 
+  # Maximum concurrent flushes (batched sends to the next consumer) for metrics batching.
+  # Bounds otelcol.processor.metricsbatcher's flush concurrency — a flush blocks for a free
+  # slot rather than running unbounded once this many are in flight at once. This is also
+  # the ceiling alloy.admissionControl's watermarks are measured against
+  # (flushes_in_flight / this value), if admission control is enabled. Default: 4
+  # maxConcurrentFlushes: 4
+
 # ------------------------------------------------------------------------------
 # Producer Configuration (OPTIONAL)
 # ------------------------------------------------------------------------------

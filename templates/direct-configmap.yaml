@@ -258,8 +258,9 @@ data:
         // together so that Prometheus histogram families (_bucket/_sum/_count) are never
         // split across separate Kafka messages.
         otelcol.processor.metricsbatcher "default" {
-          send_batch_max_size = {{ if and .Values.batch .Values.batch.metricsBatchMaxSize }}{{ .Values.batch.metricsBatchMaxSize }}{{ else }}5000{{ end }}
-          timeout             = {{ if and .Values.batch .Values.batch.timeout }}{{ .Values.batch.timeout | quote }}{{ else }}"2s"{{ end }}
+          send_batch_max_size    = {{ if and .Values.batch .Values.batch.metricsBatchMaxSize }}{{ .Values.batch.metricsBatchMaxSize }}{{ else }}5000{{ end }}
+          timeout                = {{ if and .Values.batch .Values.batch.timeout }}{{ .Values.batch.timeout | quote }}{{ else }}"2s"{{ end }}
+          max_concurrent_flushes = {{ if and .Values.batch .Values.batch.maxConcurrentFlushes }}{{ .Values.batch.maxConcurrentFlushes }}{{ else }}4{{ end }}
 
           output {
             {{- if and .Values.gateway .Values.gateway.enabled }}
