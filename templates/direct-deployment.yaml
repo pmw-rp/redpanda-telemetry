@@ -66,6 +66,15 @@ spec:
         app.kubernetes.io/instance: {{ .Values.alloy.name }}
     spec:
       serviceAccountName: {{ include "redpanda-o11y.alloyResourceName" . }}-alloy
+{{- if $clustering }}
+      # The preStop hook below blocks pod termination until discovery.redpanda
+      # has been cleanly removed as a raft voter, scaling its own wait budget
+      # up to a cap of ~90s when many replicas are leaving at once (see
+      # gracefulLeaveDeadline) — kubelet counts that time against this
+      # budget, not on top of it, so it needs real headroom beyond even that
+      # worst case for the container to actually exit afterward.
+      terminationGracePeriodSeconds: 120
+{{- end }}
       containers:
         # Main Alloy container
         - name: alloy
@@ -163,6 +172,20 @@ spec:
             timeoutSeconds: 1
             failureThreshold: 3
             successThreshold: 1
+{{- if $clustering }}
+          lifecycle:
+            preStop:
+              # Asks discovery.redpanda to gracefully leave the raft group
+              # before this pod is torn down — see the component's Handler/
+              # handleLeave. Kubernetes doesn't send SIGTERM until this
+              # returns, so raft voter removal happens one at a time no
+              # matter how many replicas are scaled down in a single step,
+              # instead of racing ahead of the leader's reconcile tick.
+              httpGet:
+                path: /api/v0/component/discovery.redpanda.pods/leave
+                port: 12345
+                scheme: HTTP
+{{- end }}
           volumeMounts:
             - name: config
               mountPath: /etc/alloy
