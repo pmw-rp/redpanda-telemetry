@@ -140,14 +140,9 @@ If `gateway.credentials` is not set, the collector uses the main `credentials` s
 
 ## Cluster UUID discovery
 
-During pod discovery, the collector queries each discovered Redpanda pod's own admin API directly (`https://<pod-ip>:9644/v1/cluster/uuid` by default) for its cluster UUID. Each pod is enriched with its own UUID individually, so multiple Redpanda clusters can be discovered and routed correctly by the same collector, even when they share a namespace. UUIDs are cached for the lifetime of the collector process, since a cluster's UUID never changes.
+During pod discovery, the collector queries each discovered Redpanda pod's own admin API directly (`<pod-ip>:9644/v1/cluster/uuid` by default) for its cluster UUID. Each pod is enriched with its own UUID individually, so multiple Redpanda clusters can be discovered and routed correctly by the same collector, even when they share a namespace. UUIDs are cached for the lifetime of the collector process, since a cluster's UUID never changes.
 
-If your Redpanda cluster does not have TLS enabled on the admin API, set `discovery.adminTLS` to `"http"`:
-
-```yaml
-discovery:
-  adminTLS: "http"
-```
+Whether each pod's admin API speaks TLS is detected automatically — the collector tries `https` first, falls back to `http`, and remembers whichever one worked for that pod. No configuration needed, and a fleet monitoring multiple Redpanda clusters doesn't need them to be uniformly TLS or plaintext.
 
 ## Configuration reference
 
@@ -174,7 +169,6 @@ discovery:
 | `discovery.namespaces` | `[<release namespace>]` | List of namespaces to discover Redpanda pods in. Add multiple entries to monitor several clusters with one collector |
 | `discovery.labelSelector` | `app.kubernetes.io/name=redpanda` | Label selector for Redpanda pods |
 | `discovery.adminPort` | `9644` | Redpanda admin API port, used for scrape discovery and per-pod UUID lookup |
-| `discovery.adminTLS` | `https` | Protocol for admin API: `https` or `http` |
 | `discovery.scrapeInterval` | `30s` | Prometheus scrape interval |
 | `discovery.scrapeTimeout` | `10s` | Prometheus scrape timeout |
 | `logs.parseSeverity` | `true` | Parse a `TRACE`/`DEBUG`/`INFO`/`WARN`/`ERROR`/`FATAL` prefix out of the log body and set it as the OTLP severity. Disable on very high-volume clusters where the per-record cost is measurable |
@@ -273,15 +267,6 @@ gateway:
     insecure_skip_verify: false
 ```
 
-### Non-TLS admin API (self-managed or local clusters)
-
-If the Redpanda admin API is not TLS-enabled, set `discovery.adminTLS: "http"` to prevent a startup failure when the collector attempts HTTPS discovery.
-
-```yaml
-discovery:
-  adminTLS: "http"
-```
-
 ## Troubleshooting
 
 ### Pods discovered but missing `cluster_id` / no telemetry from a specific cluster
@@ -292,7 +277,7 @@ Look for `failed to fetch cluster UUID` warnings in the collector logs:
 kubectl logs -n <namespace> -l app.kubernetes.io/name=alloy -c alloy | grep "cluster UUID"
 ```
 
-A pod that can't be reached on `discovery.adminPort`, or that gets `http: server gave HTTP response to HTTPS client` in the `err` field, has a TLS mismatch — the admin API is plain HTTP but `discovery.adminTLS` is `https` (the default). Set `discovery.adminTLS: "http"` in your values file. Targets with an unresolved UUID are excluded from scraping/log collection (with a warning), not fatal — the collector keeps running and shipping telemetry for every other pod.
+This means neither an `https` nor an `http` attempt against that pod's `discovery.adminPort` got a valid response — most likely the pod isn't actually reachable there yet (still starting, wrong port), not a scheme mismatch: which scheme to use is detected automatically per pod, not configured. Targets with an unresolved UUID are excluded from scraping/log collection (with a warning), not fatal — the collector keeps running and shipping telemetry for every other pod.
 
 ### No metrics appearing in Grafana
 

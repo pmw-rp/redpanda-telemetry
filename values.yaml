@@ -152,11 +152,9 @@ discovery:
   # Admin API port for metrics collection and cluster UUID discovery
   adminPort: 9644
 
-  # Admin API protocol for cluster UUID discovery
-  # Options: "https" (default), "http"
-  # Set to "http" if your Redpanda cluster does not have TLS enabled on the admin API
-  # (e.g. self-managed clusters without TLS, or local development environments)
-  adminTLS: "https"
+  # Whether each pod's admin API speaks TLS is detected automatically (discovery.redpanda
+  # probes both https and http) - no adminTLS value needed, and a fleet monitoring multiple
+  # Redpanda clusters doesn't need them to be uniformly TLS or plaintext.
 
   # Metrics scrape interval
   scrapeInterval: "30s"

@@ -1,6 +1,5 @@
 {{- $deploymentMode := .Values.alloy.deploymentMode | default "alloy" }}
 {{- if eq $deploymentMode "direct" }}
-{{- $adminTLS := .Values.discovery.adminTLS | default "https" }}
 {{- $namespaces := .Values.discovery.namespaces | default (list .Release.Namespace) }}
 {{- $adminPort := .Values.discovery.adminPort | default 9644 }}
 {{- $parseSeverity := ne ((.Values.logs).parseSeverity | toString) "false" }}
@@ -43,15 +42,15 @@ data:
         // Enrich each discovered pod with its Redpanda cluster UUID by querying
         // the admin API.  The cluster_uuid label is carried through all downstream
         // relabeling and scraping so each cluster's telemetry can be routed to its
-        // own Kafka topic without a shared remote.http fetch.
+        // own Kafka topic without a shared remote.http fetch. Whether that admin API
+        // actually speaks TLS is detected per-pod, not configured — see
+        // __tmp_admin_tls_enabled below — since a fleet of monitored Redpanda clusters
+        // isn't guaranteed to be uniformly TLS or plaintext.
         discovery.redpanda "pods" {
           targets    = discovery.kubernetes.pods.targets
           admin_port = {{ $adminPort }}
           num_shards = {{ .Values.alloy.replicas | default 3 }}
-          {{- if eq $adminTLS "https" }}
-          tls_enabled     = true
           tls_skip_verify = true
-          {{- end }}
         }
 
         // Relabel discovered targets to only scrape annotated pods
@@ -63,6 +62,23 @@ data:
             source_labels = ["__meta_kubernetes_pod_container_port_number"]
             action        = "keep"
             regex         = {{ .Values.discovery.adminPort | default 9644 | quote }}
+          }
+
+          // Route each target's scrape at whatever scheme discovery.redpanda
+          // actually detected for its admin API (see __tmp_admin_tls_enabled) —
+          // a fleet of monitored Redpanda clusters isn't guaranteed to be
+          // uniformly TLS or plaintext.
+          rule {
+            source_labels = ["__tmp_admin_tls_enabled"]
+            regex         = "true"
+            target_label  = "__scheme__"
+            replacement   = "https"
+          }
+          rule {
+            source_labels = ["__tmp_admin_tls_enabled"]
+            regex         = "false"
+            target_label  = "__scheme__"
+            replacement   = "http"
           }
 
           // Label creation - "namespace" field from "__meta_kubernetes_namespace"
@@ -175,14 +191,15 @@ data:
         }
         {{- end }}
 
-        // Scrape metrics from discovered pods
-        {{- if eq $adminTLS "https" }}
+        // Scrape metrics from discovered pods. No scheme set here — each
+        // target's own __scheme__ (set above from __tmp_admin_tls_enabled)
+        // decides http vs https per pod; tls_config is simply unused for
+        // any target that resolves to http.
         prometheus.scrape "kubernetes_metrics" {
           targets    = discovery.relabel.kubernetes_pods.output
           forward_to = [otelcol.receiver.prometheus.default.receiver]
           scrape_interval = {{ .Values.discovery.scrapeInterval | default "30s" | quote }}
           scrape_timeout  = {{ .Values.discovery.scrapeTimeout | default "10s" | quote }}
-          scheme = "https"
           tls_config {
             insecure_skip_verify = true
           }
@@ -193,26 +210,10 @@ data:
           forward_to = [otelcol.receiver.prometheus.default.receiver]
           scrape_interval = {{ .Values.discovery.scrapeInterval | default "30s" | quote }}
           scrape_timeout  = {{ .Values.discovery.scrapeTimeout | default "10s" | quote }}
-          scheme = "https"
           tls_config {
             insecure_skip_verify = true
           }
         }
-        {{- else }}
-        prometheus.scrape "kubernetes_metrics" {
-          targets    = discovery.relabel.kubernetes_pods.output
-          forward_to = [otelcol.receiver.prometheus.default.receiver]
-          scrape_interval = {{ .Values.discovery.scrapeInterval | default "30s" | quote }}
-          scrape_timeout  = {{ .Values.discovery.scrapeTimeout | default "10s" | quote }}
-        }
-
-        prometheus.scrape "kubernetes_metrics_public" {
-          targets    = discovery.relabel.kubernetes_pods_public.output
-          forward_to = [otelcol.receiver.prometheus.default.receiver]
-          scrape_interval = {{ .Values.discovery.scrapeInterval | default "30s" | quote }}
-          scrape_timeout  = {{ .Values.discovery.scrapeTimeout | default "10s" | quote }}
-        }
-        {{- end }}
 
         // Convert Prometheus metrics to OpenTelemetry format
         otelcol.receiver.prometheus "default" {
