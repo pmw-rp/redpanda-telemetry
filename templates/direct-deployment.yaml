@@ -3,7 +3,21 @@
 {{- $namespaces := .Values.discovery.namespaces | default (list .Release.Namespace) }}
 {{- $replicas := .Values.alloy.replicas | default 3 }}
 {{- $clustering := .Values.alloy.clustering | default false }}
-{{- $clusterWaitForSize := .Values.alloy.clusterWaitForSize | default 2 }}
+{{- $autoscaling := .Values.autoscaling | default dict }}
+{{- $autoscalingEnabled := and $autoscaling.enabled $clustering }}
+{{- if and $autoscaling.enabled (not $clustering) }}
+{{- fail "autoscaling.enabled requires alloy.clustering: true — num_shards (the non-clustering scheme) is baked in at render time from alloy.replicas, so it goes stale the instant HPA changes the real replica count out-of-band. Clustering mode's Raft-based ownership has no such staleness problem." }}
+{{- end }}
+{{- /*
+  clusterWaitForSize defaults to 2, but that default assumes replica count
+  only ever changes via `helm upgrade` (see alloy.clusterWaitForSize's own
+  comment in values.yaml). Autoscaling breaks that assumption — replica
+  count can drop below whatever's baked in here at any time, independent
+  of any helm upgrade — so with autoscaling.enabled, default to 1 (the
+  safe floor: ready as soon as any single replica is up) instead, unless
+  explicitly overridden.
+*/}}
+{{- $clusterWaitForSize := .Values.alloy.clusterWaitForSize | default (ternary 1 2 $autoscalingEnabled) }}
 apiVersion: v1
 kind: Service
 metadata:
@@ -39,7 +53,15 @@ metadata:
     app.kubernetes.io/instance: {{ .Values.alloy.name }}
     app.kubernetes.io/component: alloy
 spec:
+{{- if not $autoscalingEnabled }}
+  # Omitted entirely when autoscaling is enabled: once an HPA owns
+  # .spec.replicas, every helm upgrade re-asserting a static value here
+  # would fight it — each upgrade would reset the count until the HPA's
+  # next sync corrects it again. Kubernetes defaults a brand-new
+  # StatefulSet's replicas to 1 if this is omitted at creation, which the
+  # HPA then adjusts on its own next reconcile.
   replicas: {{ $replicas }}
+{{- end }}
 {{- if $clustering }}
   # Per-pod DNS names (via the headless Service above) that Raft peers use
   # to address each other and survive a restart without going stale — see
@@ -185,6 +207,27 @@ spec:
                 path: /api/v0/component/discovery.redpanda.pods/leave
                 port: 12345
                 scheme: HTTP
+{{- end }}
+          # Required for autoscaling.enabled: HPA's CPU/memory Resource
+          # metric computes utilization as usage / requested-amount, per
+          # container that has a request set — with none set here at all,
+          # it would only ever see config-reloader's tiny 10m/50Mi request
+          # as "the request" for the whole pod, making utilization wildly
+          # (and meaninglessly) large. Defaults are a rough first pass from
+          # one observed data point (a single replica temporarily carrying
+          # every broker during scale-down testing: ~33m CPU, ~634Mi
+          # memory), not a load test — revisit once this runs under real,
+          # steady, multi-replica traffic.
+          resources:
+{{- if .Values.alloy.resources }}
+{{ toYaml .Values.alloy.resources | nindent 12 }}
+{{- else }}
+            requests:
+              cpu: 100m
+              memory: 384Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
 {{- end }}
           volumeMounts:
             - name: config

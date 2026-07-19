@@ -1,0 +1,34 @@
+{{- $deploymentMode := .Values.alloy.deploymentMode | default "alloy" }}
+{{- $clustering := .Values.alloy.clustering | default false }}
+{{- $autoscaling := .Values.autoscaling | default dict }}
+{{- if $autoscaling.enabled }}
+{{- if not (eq $deploymentMode "direct") }}
+{{- fail "autoscaling.enabled currently only supports alloy.deploymentMode: direct — the alloy deployment mode's StatefulSet is created by the Alloy Operator, not this chart, so there's no resource here for an HPA to target yet." }}
+{{- end }}
+{{- if not $clustering }}
+{{- fail "autoscaling.enabled requires alloy.clustering: true — num_shards (the non-clustering scheme) is baked in at render time from alloy.replicas, so it goes stale the instant HPA changes the real replica count out-of-band. Clustering mode's Raft-based ownership has no such staleness problem." }}
+{{- end }}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "redpanda-o11y.alloyResourceName" . }}-alloy
+  namespace: {{ .Values.alloy.namespace }}
+  labels:
+    app.kubernetes.io/name: alloy
+    app.kubernetes.io/instance: {{ .Values.alloy.name }}
+    app.kubernetes.io/component: autoscaling
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: StatefulSet
+    name: {{ include "redpanda-o11y.alloyResourceName" . }}-alloy
+  minReplicas: {{ $autoscaling.minReplicas | default 3 }}
+  maxReplicas: {{ $autoscaling.maxReplicas | default 10 }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ $autoscaling.targetCPUUtilizationPercentage | default 75 }}
+{{- end }}

@@ -58,6 +58,40 @@ alloy:
   # Defaults to paulmw/alloy:v1.17.1-rp-0.2.0-dev-clustering
   # image: "paulmw/alloy:v1.17.1-rp-0.2.0-dev-clustering"
 
+  # CPU/memory requests and limits for the alloy container (direct mode only). Required for
+  # autoscaling below to mean anything — HPA's CPU/memory utilization is computed against
+  # whatever's requested here. Defaults are a rough first pass from one observed data point
+  # (a single replica temporarily carrying every broker during scale-down testing: ~33m CPU,
+  # ~634Mi memory), not a load test.
+  # resources:
+  #   requests:
+  #     cpu: 100m
+  #     memory: 384Mi
+  #   limits:
+  #     cpu: 1000m
+  #     memory: 1Gi
+
+# ------------------------------------------------------------------------------
+# Autoscaling Configuration (OPTIONAL, direct mode + clustering only)
+# ------------------------------------------------------------------------------
+# A HorizontalPodAutoscaler targeting the collector StatefulSet. Requires alloy.clustering:
+# true — the chart refuses to render otherwise (see templates/direct-hpa.yaml's comment for
+# why): the default static ordinal scheme bakes num_shards in from alloy.replicas at render
+# time, so it goes stale the instant the HPA changes the real replica count out-of-band.
+# Clustering mode's Raft-based ownership has no such staleness problem. Enabling this also
+# changes two defaults automatically, without needing to set them yourself: alloy.replicas is
+# no longer applied to the StatefulSet (the HPA owns replica count from here on, so a helm
+# upgrade re-asserting a static value would just fight it), and alloy.clusterWaitForSize
+# defaults to 1 instead of 2 (so a scale-down below whatever's baked into a normal deploy
+# never leaves cluster.Ready() permanently false).
+autoscaling:
+  enabled: false
+  minReplicas: 3
+  maxReplicas: 10
+  # Target average CPU utilization across pods, as a percentage of each container's own
+  # requested CPU (see alloy.resources above).
+  targetCPUUtilizationPercentage: 75
+
 # ------------------------------------------------------------------------------
 # Customer Configuration (REQUIRED)
 # ------------------------------------------------------------------------------
