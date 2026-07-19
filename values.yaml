@@ -86,7 +86,7 @@ alloy:
 # never leaves cluster.Ready() permanently false).
 autoscaling:
   enabled: false
-  minReplicas: 3
+  minReplicas: 1
   maxReplicas: 10
   # Target average CPU utilization across pods, as a percentage of each container's own
   # requested CPU (see alloy.resources above).

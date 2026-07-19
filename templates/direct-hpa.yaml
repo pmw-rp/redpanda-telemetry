@@ -22,7 +22,7 @@ spec:
     apiVersion: apps/v1
     kind: StatefulSet
     name: {{ include "redpanda-o11y.alloyResourceName" . }}-alloy
-  minReplicas: {{ $autoscaling.minReplicas | default 3 }}
+  minReplicas: {{ $autoscaling.minReplicas | default 1 }}
   maxReplicas: {{ $autoscaling.maxReplicas | default 10 }}
   metrics:
     - type: Resource
