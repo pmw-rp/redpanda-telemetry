@@ -58,18 +58,20 @@ alloy:
   # Defaults to paulmw/alloy:v1.17.1-rp-0.2.0-dev-clustering
   # image: "paulmw/alloy:v1.17.1-rp-0.2.0-dev-clustering"
 
-  # CPU/memory requests and limits for the alloy container (direct mode only). Required for
-  # autoscaling below to mean anything — HPA's memory utilization is computed against
-  # whatever's requested here. Memory request == limit deliberately: unlike CPU, memory
-  # isn't compressible, so bursting above the request just means a later, harder-to-predict
-  # OOM kill instead of a steady, learnable scaling signal.
-  # resources:
-  #   requests:
-  #     cpu: 100m
-  #     memory: 1Gi
-  #   limits:
-  #     cpu: 1000m
-  #     memory: 1Gi
+  # CPU/memory requests and limits for the alloy container (both deployment modes). Required
+  # for autoscaling below to mean anything — HPA's memory utilization is computed against
+  # whatever's requested here. Also the single source of truth for GOMEMLIMIT (see
+  # templates/alloy.yaml / direct-deployment.yaml), which is derived from resources.limits.memory.
+  # Memory request == limit deliberately: unlike CPU, memory isn't compressible, so bursting
+  # above the request just means a later, harder-to-predict OOM kill instead of a steady,
+  # learnable scaling signal.
+  resources:
+    requests:
+      cpu: "1"
+      memory: 4Gi
+    limits:
+      cpu: "1"
+      memory: 4Gi
 
 # ------------------------------------------------------------------------------
 # Autoscaling Configuration (OPTIONAL, direct mode + clustering only)
