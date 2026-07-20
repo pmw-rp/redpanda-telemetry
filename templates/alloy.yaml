@@ -5,6 +5,13 @@
 {{- $parseSeverity := ne ((.Values.logs).parseSeverity | toString) "false" }}
 {{- $clustering := .Values.alloy.clustering | default false }}
 {{- $replicas := .Values.alloy.replicas | default 3 }}
+{{- /* Single source of truth for the alloy container's memory limit, used
+   both for resources below and to derive GOMEMLIMIT — see
+   direct-deployment.yaml's matching comment for why. */}}
+{{- $memLimitStr := "1Gi" }}
+{{- if and .Values.alloy.resources .Values.alloy.resources.limits .Values.alloy.resources.limits.memory }}
+{{- $memLimitStr = .Values.alloy.resources.limits.memory }}
+{{- end }}
 apiVersion: collectors.grafana.com/v1alpha1
 kind: Alloy
 metadata:
@@ -38,6 +45,22 @@ spec:
 {{- end }}
   alloy:
     stabilityLevel: experimental
+    # Memory request == limit deliberately: unlike CPU, memory isn't
+    # compressible, so bursting above the request just means a later,
+    # harder-to-predict OOM kill instead of a steady, learnable scaling
+    # signal. See GOMEMLIMIT below in extraEnv for why the limit alone
+    # isn't enough — Go's GC has no visibility into it without that.
+    resources:
+{{- if .Values.alloy.resources }}
+{{ toYaml .Values.alloy.resources | nindent 6 }}
+{{- else }}
+      requests:
+        cpu: 100m
+        memory: {{ $memLimitStr }}
+      limits:
+        cpu: 1000m
+        memory: {{ $memLimitStr }}
+{{- end }}
 {{- if $clustering }}
     lifecycle:
       preStop:
@@ -53,6 +76,17 @@ spec:
           scheme: HTTP
 {{- end }}
     extraEnv:
+      # Go's GC only paces itself off heap-doubling (GOGC=100) by default,
+      # with no awareness of this container's actual memory limit above —
+      # confirmed live: low CPU (GC running infrequently) and memory
+      # sitting close to the limit are the same fact, not a contradiction.
+      # GOMEMLIMIT gives the GC a real ceiling to pace against instead, at
+      # 90% of the configured limit (see redpanda-o11y.gomemlimitBytes) —
+      # not 100%, since the container's actual RSS also includes non-heap
+      # memory (goroutine stacks, mmap'd files) that GOMEMLIMIT alone can't
+      # see or bound.
+      - name: GOMEMLIMIT
+        value: {{ include "redpanda-o11y.gomemlimitBytes" $memLimitStr | quote }}
 {{- if not $clustering }}
       # Used by discovery.redpanda's default (non-clustering) scheme to
       # shard scrape targets by __tmp_pod_ordinal % num_shards.

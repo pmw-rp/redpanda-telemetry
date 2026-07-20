@@ -8,6 +8,14 @@
 {{- if and $autoscaling.enabled (not $clustering) }}
 {{- fail "autoscaling.enabled requires alloy.clustering: true — num_shards (the non-clustering scheme) is baked in at render time from alloy.replicas, so it goes stale the instant HPA changes the real replica count out-of-band. Clustering mode's Raft-based ownership has no such staleness problem." }}
 {{- end }}
+{{- /* Single source of truth for the alloy container's memory limit, used
+   both for the resources block below and to derive GOMEMLIMIT — so they
+   can never drift apart the way a hardcoded GOMEMLIMIT next to a
+   configurable resources.limits.memory would. */}}
+{{- $memLimitStr := "1Gi" }}
+{{- if and .Values.alloy.resources .Values.alloy.resources.limits .Values.alloy.resources.limits.memory }}
+{{- $memLimitStr = .Values.alloy.resources.limits.memory }}
+{{- end }}
 {{- /*
   clusterWaitForSize defaults to 2, but that default assumes replica count
   only ever changes via `helm upgrade` (see alloy.clusterWaitForSize's own
@@ -121,6 +129,18 @@ spec:
           env:
             - name: ALLOY_DEPLOY_MODE
               value: helm
+            # Go's GC only paces itself off heap-doubling (GOGC=100) by
+            # default, with no awareness of this container's actual memory
+            # limit — confirmed live: low CPU (GC running infrequently) and
+            # memory sitting close to the limit are the same fact, not a
+            # contradiction. GOMEMLIMIT gives the GC a real ceiling to pace
+            # against instead, at 90% of the configured limit (see
+            # redpanda-o11y.gomemlimitBytes) — not 100%, since the
+            # container's actual RSS also includes non-heap memory
+            # (goroutine stacks, mmap'd files) that GOMEMLIMIT alone can't
+            # see or bound.
+            - name: GOMEMLIMIT
+              value: {{ include "redpanda-o11y.gomemlimitBytes" $memLimitStr | quote }}
 {{- if not $clustering }}
             # Used by discovery.redpanda's default (non-clustering) scheme to
             # shard scrape targets by __tmp_pod_ordinal % num_shards — see
@@ -230,10 +250,10 @@ spec:
 {{- else }}
             requests:
               cpu: 100m
-              memory: 1Gi
+              memory: {{ $memLimitStr }}
             limits:
               cpu: 1000m
-              memory: 1Gi
+              memory: {{ $memLimitStr }}
 {{- end }}
           volumeMounts:
             - name: config
