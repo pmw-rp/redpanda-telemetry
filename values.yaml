@@ -59,17 +59,17 @@ alloy:
   # image: "paulmw/alloy:v1.17.1-rp-0.2.0-dev-clustering"
 
   # CPU/memory requests and limits for the alloy container (direct mode only). Required for
-  # autoscaling below to mean anything — HPA's CPU/memory utilization is computed against
-  # whatever's requested here. Defaults are a rough first pass from one observed data point
-  # (a single replica temporarily carrying every broker during scale-down testing: ~33m CPU,
-  # ~634Mi memory), not a load test.
+  # autoscaling below to mean anything — HPA's memory utilization is computed against
+  # whatever's requested here. Memory request == limit deliberately: unlike CPU, memory
+  # isn't compressible, so bursting above the request just means a later, harder-to-predict
+  # OOM kill instead of a steady, learnable scaling signal.
   # resources:
   #   requests:
   #     cpu: 100m
-  #     memory: 384Mi
+  #     memory: 512Mi
   #   limits:
   #     cpu: 1000m
-  #     memory: 1Gi
+  #     memory: 512Mi
 
 # ------------------------------------------------------------------------------
 # Autoscaling Configuration (OPTIONAL, direct mode + clustering only)
@@ -84,13 +84,20 @@ alloy:
 # upgrade re-asserting a static value would just fight it), and alloy.clusterWaitForSize
 # defaults to 1 instead of 2 (so a scale-down below whatever's baked into a normal deploy
 # never leaves cluster.Ready() permanently false).
+#
+# Scales on memory, not CPU — per Grafana's own Alloy deployment guidance
+# (https://grafana.com/docs/alloy/latest/set-up/deploy/), and confirmed live: a short,
+# aggressive scrape interval against large per-target payloads drove heavy GC overhead that
+# showed up as a CPU spike on whichever replica happened to own the heaviest broker at that
+# moment (Raft's ownership allocation is fair by broker count, not by actual load), causing
+# the CPU-based scale-up/down cycle to feed on itself.
 autoscaling:
   enabled: false
   minReplicas: 1
   maxReplicas: 10
-  # Target average CPU utilization across pods, as a percentage of each container's own
-  # requested CPU (see alloy.resources above).
-  targetCPUUtilizationPercentage: 75
+  # Target average memory utilization across pods, as a percentage of each container's own
+  # requested memory (see alloy.resources above).
+  targetMemoryUtilizationPercentage: 75
 
 # ------------------------------------------------------------------------------
 # Customer Configuration (REQUIRED)

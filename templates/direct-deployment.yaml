@@ -208,26 +208,30 @@ spec:
                 port: 12345
                 scheme: HTTP
 {{- end }}
-          # Required for autoscaling.enabled: HPA's CPU/memory Resource
-          # metric computes utilization as usage / requested-amount, per
-          # container that has a request set — with none set here at all,
-          # it would only ever see config-reloader's tiny 10m/50Mi request
-          # as "the request" for the whole pod, making utilization wildly
-          # (and meaninglessly) large. Defaults are a rough first pass from
-          # one observed data point (a single replica temporarily carrying
-          # every broker during scale-down testing: ~33m CPU, ~634Mi
-          # memory), not a load test — revisit once this runs under real,
-          # steady, multi-replica traffic.
+          # Required for autoscaling.enabled: HPA's memory Resource metric
+          # computes utilization as usage / requested-amount, per container
+          # that has a request set — with none set here at all, it would
+          # only ever see config-reloader's tiny 10m/50Mi request as "the
+          # request" for the whole pod, making utilization wildly (and
+          # meaninglessly) large. Memory request == limit deliberately
+          # (512Mi/512Mi): unlike CPU, memory isn't compressible, so
+          # bursting above the request with headroom to a higher limit
+          # just means a later, harder-to-predict OOM kill instead of a
+          # steady, learnable scaling signal — HPA scales on memory now,
+          # not CPU, per Grafana's own Alloy deployment guidance
+          # (https://grafana.com/docs/alloy/latest/set-up/deploy/) and a
+          # live-confirmed case where CPU turned out to be the wrong
+          # signal for this workload (see templates/direct-hpa.yaml).
           resources:
 {{- if .Values.alloy.resources }}
 {{ toYaml .Values.alloy.resources | nindent 12 }}
 {{- else }}
             requests:
               cpu: 100m
-              memory: 384Mi
+              memory: 512Mi
             limits:
               cpu: 1000m
-              memory: 1Gi
+              memory: 512Mi
 {{- end }}
           volumeMounts:
             - name: config

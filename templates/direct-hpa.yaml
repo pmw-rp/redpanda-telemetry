@@ -25,10 +25,20 @@ spec:
   minReplicas: {{ $autoscaling.minReplicas | default 1 }}
   maxReplicas: {{ $autoscaling.maxReplicas | default 10 }}
   metrics:
+    # Memory, not CPU — per Grafana's own Alloy deployment guidance
+    # (https://grafana.com/docs/alloy/latest/set-up/deploy/). Confirmed live
+    # why CPU is the wrong signal here: a short, aggressive scrape interval
+    # against large per-target payloads drove heavy GC overhead that showed
+    # up as a CPU spike on whichever replica happened to own the heaviest
+    # broker at that moment — Raft's ownership allocation is fair by broker
+    # count, not by actual load, so the "hot" replica rotated as ownership
+    # shifted, and the resulting CPU-based scale-up/down cycle fed on
+    # itself. Memory pressure is a steadier, less bursty signal for this
+    # workload.
     - type: Resource
       resource:
-        name: cpu
+        name: memory
         target:
           type: Utilization
-          averageUtilization: {{ $autoscaling.targetCPUUtilizationPercentage | default 75 }}
+          averageUtilization: {{ $autoscaling.targetMemoryUtilizationPercentage | default 75 }}
 {{- end }}
