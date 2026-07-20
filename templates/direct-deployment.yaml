@@ -213,15 +213,21 @@ spec:
           # that has a request set — with none set here at all, it would
           # only ever see config-reloader's tiny 10m/50Mi request as "the
           # request" for the whole pod, making utilization wildly (and
-          # meaninglessly) large. Memory request == limit deliberately
-          # (512Mi/512Mi): unlike CPU, memory isn't compressible, so
-          # bursting above the request with headroom to a higher limit
-          # just means a later, harder-to-predict OOM kill instead of a
-          # steady, learnable scaling signal — HPA scales on memory now,
-          # not CPU, per Grafana's own Alloy deployment guidance
+          # meaninglessly) large. HPA scales on memory now, not CPU, per
+          # Grafana's own Alloy deployment guidance
           # (https://grafana.com/docs/alloy/latest/set-up/deploy/) and a
           # live-confirmed case where CPU turned out to be the wrong
           # signal for this workload (see templates/direct-hpa.yaml).
+          #
+          # Request (512Mi) is the deliberate scaling baseline. Limit is
+          # NOT set equal to it here, unlike the usual "memory isn't
+          # compressible" advice, because live usage during testing
+          # (~658Mi, with leftover high-cardinality test topics still on
+          # the monitored clusters) already exceeded 512Mi — a 512Mi limit
+          # would OOM-kill immediately rather than demonstrate scaling.
+          # Revisit once real steady-state usage is known: either the
+          # limit should come down to close to the request, or the
+          # request itself needs raising.
           resources:
 {{- if .Values.alloy.resources }}
 {{ toYaml .Values.alloy.resources | nindent 12 }}
@@ -231,7 +237,7 @@ spec:
               memory: 512Mi
             limits:
               cpu: 1000m
-              memory: 512Mi
+              memory: 1Gi
 {{- end }}
           volumeMounts:
             - name: config

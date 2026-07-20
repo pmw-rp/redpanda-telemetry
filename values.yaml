@@ -97,7 +97,7 @@ autoscaling:
   maxReplicas: 10
   # Target average memory utilization across pods, as a percentage of each container's own
   # requested memory (see alloy.resources above).
-  targetMemoryUtilizationPercentage: 75
+  targetMemoryUtilizationPercentage: 80
 
 # ------------------------------------------------------------------------------
 # Customer Configuration (REQUIRED)

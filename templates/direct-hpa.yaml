@@ -40,5 +40,5 @@ spec:
         name: memory
         target:
           type: Utilization
-          averageUtilization: {{ $autoscaling.targetMemoryUtilizationPercentage | default 75 }}
+          averageUtilization: {{ $autoscaling.targetMemoryUtilizationPercentage | default 80 }}
 {{- end }}
