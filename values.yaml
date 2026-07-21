@@ -55,8 +55,8 @@ alloy:
   # maxUnavailable: 3
 
   # Override the Alloy container image (optional)
-  # Defaults to paulmw/alloy:v1.17.1-rp-0.2.0-dev
-  # image: "paulmw/alloy:v1.17.1-rp-0.2.0-dev"
+  # Defaults to paulmw/alloy:v1.17.1-rp-0.2.0-dev-clustering
+  # image: "paulmw/alloy:v1.17.1-rp-0.2.0-dev-clustering"
 
 # ------------------------------------------------------------------------------
 # Customer Configuration (REQUIRED)
