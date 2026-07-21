@@ -85,17 +85,16 @@ credentials:
   # password: ""
 
 # ------------------------------------------------------------------------------
-# Redpanda Connection Configuration (REQUIRED for Kafka mode)
+# Redpanda Connection Configuration (OPTIONAL for Kafka mode)
 # ------------------------------------------------------------------------------
 # Kafka bootstrap server and SASL settings for direct-to-Kafka export.
 # These are used when gateway.enabled is false (the default).
-redpanda:
-  # Kafka bootstrap server
-  bootstrapServer: "CHANGEME:9092"
-
-  # SASL authentication mechanism
-  # Options: "SCRAM-SHA-256", "SCRAM-SHA-512"
-  saslMechanism: "SCRAM-SHA-256"
+# Leave commented to use the shared observability-platform Kafka cluster's default bootstrap
+# server and SCRAM-SHA-256 (see templates/alloy.yaml / direct-configmap.yaml for the literal
+# default) — set explicitly only to point at a different Kafka cluster.
+#redpanda:
+#  bootstrapServer: "seed-xxxxx.xxxxxxxxxxxxxxxx.byoc.prd.cloud.redpanda.com:9092"
+#  saslMechanism: "SCRAM-SHA-256"  # or "SCRAM-SHA-512"
 
 # ------------------------------------------------------------------------------
 # Gateway Configuration (OPTIONAL)
