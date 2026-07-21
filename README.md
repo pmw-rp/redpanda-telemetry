@@ -155,7 +155,7 @@ Whether each pod's admin API speaks TLS is detected automatically — the collec
 | `alloy.logLevel` | `info` | Alloy's own log level: `error`, `warn`, `info`, or `debug` |
 | `alloy.liveDebugging` | `false` | Enable the Alloy UI's live data inspector. Not recommended for production |
 | `alloy.maxUnavailable` | `alloy.replicas` | Max pods unavailable during a rolling update (StatefulSet only) |
-| `alloy.image` | `paulmw/alloy:v1.17.1-rp` | Alloy container image. Must be built from this fork (or a later release of it) — a stock/upstream Alloy image won't have the custom components this chart depends on |
+| `alloy.image` | `paulmw/alloy:v1.17.1-rp-0.2.0-dev` | Alloy container image. Must be built from this fork (or a later release of it) — a stock/upstream Alloy image won't have the custom components this chart depends on |
 | `customer` | — | **Required.** Customer name used to construct topic names |
 | `credentials.secretName` | — | Name of the Kubernetes Secret containing `username` and `password` |
 | `gateway.enabled` | `false` | Enable gateway (OTLP HTTP) transport instead of direct Kafka |

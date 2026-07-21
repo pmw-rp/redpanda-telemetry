@@ -9,7 +9,7 @@ metadata:
   name: {{ include "redpanda-o11y.alloyResourceName" . }}
   namespace: {{ .Values.alloy.namespace }}
 spec:
-  {{- $defaultImage := "paulmw/alloy:v1.17.1-rp" }}
+  {{- $defaultImage := "paulmw/alloy:v1.17.1-rp-0.2.0-dev" }}
   {{- $imageStr := .Values.alloy.image | default $defaultImage }}
   {{- $imageParts := splitList ":" $imageStr }}
   image:

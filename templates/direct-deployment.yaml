@@ -54,7 +54,7 @@ spec:
       containers:
         # Main Alloy container
         - name: alloy
-          image: {{ if .Values.alloy.image }}{{ .Values.alloy.image }}{{ else }}paulmw/alloy:v1.17.1-rp{{ end }}
+          image: {{ if .Values.alloy.image }}{{ .Values.alloy.image }}{{ else }}paulmw/alloy:v1.17.1-rp-0.2.0-dev{{ end }}
           imagePullPolicy: IfNotPresent
           args:
             - run
